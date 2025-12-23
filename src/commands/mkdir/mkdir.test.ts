@@ -3,7 +3,7 @@ import { BashEnv } from '../../BashEnv.js';
 
 describe('mkdir', () => {
   it('should create directory', async () => {
-    const env = new BashEnv();
+    const env = new BashEnv({ cwd: '/' });
     const result = await env.exec('mkdir /newdir');
     expect(result.stdout).toBe('');
     expect(result.stderr).toBe('');
@@ -13,7 +13,7 @@ describe('mkdir', () => {
   });
 
   it('should create multiple directories', async () => {
-    const env = new BashEnv();
+    const env = new BashEnv({ cwd: '/' });
     await env.exec('mkdir /dir1 /dir2 /dir3');
     const ls = await env.exec('ls /');
     expect(ls.stdout).toBe('dir1\ndir2\ndir3\n');

@@ -17,15 +17,17 @@ pnpm install
 ```typescript
 import { BashEnv } from "./src/BashEnv.js";
 
-const env = new BashEnv({
-  files: {
-    "/home/user/file.txt": "Hello, world!",
-  },
-  cwd: "/home/user",
-});
+// Default layout: starts in /home/user with /bin, /tmp
+const env = new BashEnv();
+await env.exec('echo "Hello" > greeting.txt');
+const result = await env.exec("cat greeting.txt");
+console.log(result.stdout); // "Hello\n"
 
-const result = await env.exec("cat file.txt | grep Hello");
-console.log(result.stdout); // "Hello, world!\n"
+// Custom files: starts in / with only specified files
+const custom = new BashEnv({
+  files: { "/data/file.txt": "content" },
+});
+await custom.exec("cat /data/file.txt");
 ```
 
 ### Interactive Shell
@@ -46,7 +48,21 @@ All commands support `--help` for usage information.
 - Redirections: `>`, `>>`, `2>`, `2>&1`, `<`
 - Command chaining: `&&`, `||`, `;`
 - Variables: `$VAR`, `${VAR}`, `${VAR:-default}`
+- Positional parameters: `$1`, `$2`, `$@`, `$#`
 - Glob patterns: `*`, `?`, `[...]`
+- If statements: `if COND; then CMD; elif COND; then CMD; else CMD; fi`
+- Functions: `function name { ... }` or `name() { ... }`
+
+## Default Layout
+
+When created without options, BashEnv provides a Unix-like directory structure:
+
+- `/home/user` - Default working directory (and `$HOME`)
+- `/bin` - Contains stubs for all built-in commands
+- `/usr/bin` - Additional binary directory
+- `/tmp` - Temporary files directory
+
+Commands can be invoked by path (e.g., `/bin/ls`) or by name.
 
 ## Development
 

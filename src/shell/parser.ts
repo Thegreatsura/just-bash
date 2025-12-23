@@ -45,7 +45,12 @@ type TokenType =
   | 'redirect-stderr'
   | 'redirect-stderr-append'
   | 'redirect-stderr-to-stdout'
-  | 'redirect-stdin';
+  | 'redirect-stdin'
+  | 'if'
+  | 'then'
+  | 'elif'
+  | 'else'
+  | 'fi';
 
 interface Token {
   type: TokenType;
@@ -278,14 +283,33 @@ export class ShellParser {
       };
     }
 
-    // Handle $VAR
+    // Handle special variables: $@, $#, $$, $?, $!, $*
+    if ('@#$?!*'.includes(str[i])) {
+      return {
+        value: this.env[str[i]] ?? '',
+        endIndex: i + 1,
+      };
+    }
+
+    // Handle positional parameters: $0, $1, $2, ...
+    if (/[0-9]/.test(str[i])) {
+      return {
+        value: this.env[str[i]] ?? '',
+        endIndex: i + 1,
+      };
+    }
+
+    // Handle $VAR - must start with letter or underscore
     let varName = '';
-    while (i < str.length && /[A-Za-z0-9_]/.test(str[i])) {
-      if (varName === '' && /[0-9]/.test(str[i])) {
-        break;
-      }
+    // First char must be letter or underscore
+    if (/[A-Za-z_]/.test(str[i])) {
       varName += str[i];
       i++;
+      // Subsequent chars can include digits
+      while (i < str.length && /[A-Za-z0-9_]/.test(str[i])) {
+        varName += str[i];
+        i++;
+      }
     }
 
     if (!varName) {
@@ -296,6 +320,71 @@ export class ShellParser {
       value: this.env[varName] ?? '',
       endIndex: i,
     };
+  }
+
+  /**
+   * Collect tokens for a compound command (if...fi, while...done, etc.)
+   */
+  private collectCompoundCommand(
+    tokens: Token[],
+    startIndex: number,
+    startKeyword: string,
+    endKeyword: string
+  ): { text: string; endIndex: number } {
+    let depth = 0;
+    let text = '';
+    let i = startIndex;
+
+    while (i < tokens.length) {
+      const token = tokens[i];
+      const tokenText = token.type === 'word' ? token.value : this.tokenToText(token);
+
+      if (token.type === 'word' && token.value === startKeyword) {
+        depth++;
+      } else if (token.type === 'word' && token.value === endKeyword) {
+        depth--;
+        if (depth === 0) {
+          text += tokenText;
+          return { text, endIndex: i };
+        }
+      }
+
+      text += tokenText;
+
+      // Add space after most tokens, but handle operators specially
+      if (i + 1 < tokens.length) {
+        const nextToken = tokens[i + 1];
+        if (token.type === 'word' && nextToken.type === 'word') {
+          text += ' ';
+        } else if (token.type !== 'semicolon' && nextToken.type !== 'semicolon') {
+          text += ' ';
+        }
+      }
+
+      i++;
+    }
+
+    // Unclosed compound command
+    return { text, endIndex: i - 1 };
+  }
+
+  /**
+   * Convert a token back to its text representation
+   */
+  private tokenToText(token: Token): string {
+    switch (token.type) {
+      case 'pipe': return '|';
+      case 'and': return '&&';
+      case 'or': return '||';
+      case 'semicolon': return ';';
+      case 'redirect-stdout': return '>';
+      case 'redirect-stdout-append': return '>>';
+      case 'redirect-stderr': return '2>';
+      case 'redirect-stderr-append': return '2>>';
+      case 'redirect-stderr-to-stdout': return '2>&1';
+      case 'redirect-stdin': return '<';
+      default: return token.value;
+    }
   }
 
   /**
@@ -339,6 +428,14 @@ export class ShellParser {
 
       switch (token.type) {
         case 'word':
+          // Check for compound commands (if, while, for, case)
+          if (token.value === 'if' && currentArgs.length === 0) {
+            // Collect all tokens until matching 'fi'
+            const compoundCmd = this.collectCompoundCommand(tokens, i, 'if', 'fi');
+            currentArgs.push({ value: compoundCmd.text, quoted: true });
+            i = compoundCmd.endIndex;
+            continue;
+          }
           currentArgs.push({ value: token.value, quoted: token.quoted ?? false });
           break;
 

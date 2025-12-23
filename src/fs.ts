@@ -82,8 +82,8 @@ export class VirtualFs implements IFileSystem {
     }
   }
 
-  // Sync methods (internal use)
-  private writeFileSync(path: string, content: string): void {
+  // Sync method for writing files
+  writeFileSync(path: string, content: string): void {
     const normalized = this.normalizePath(path);
     this.ensureParentDirs(normalized);
     this.data.set(normalized, { type: 'file', content, mode: 0o644 });

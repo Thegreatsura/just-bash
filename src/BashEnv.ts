@@ -57,16 +57,37 @@ export class BashEnv {
   private cwd: string;
   private env: Record<string, string>;
   private commands: CommandRegistry = new Map();
-  private previousDir: string = '/';
+  private functions: Map<string, string> = new Map();
+  private previousDir: string = '/home/user';
   private parser: ShellParser;
+  private useDefaultLayout: boolean = false;
 
   constructor(options: BashEnvOptions = {}) {
     // Use provided filesystem or create a new VirtualFs
     const fs = options.fs ?? new VirtualFs(options.files);
     this.fs = fs;
-    this.cwd = options.cwd || '/';
-    this.env = { HOME: '/', PATH: '/bin', ...options.env };
+
+    // Use /home/user as default cwd only if no cwd specified
+    this.useDefaultLayout = !options.cwd && !options.files;
+    this.cwd = options.cwd || (this.useDefaultLayout ? '/home/user' : '/');
+    this.env = {
+      HOME: this.useDefaultLayout ? '/home/user' : '/',
+      PATH: '/bin:/usr/bin',
+      ...options.env
+    };
     this.parser = new ShellParser(this.env);
+
+    // Create essential directories for VirtualFs (only for default layout)
+    if (fs instanceof VirtualFs && this.useDefaultLayout) {
+      try {
+        fs.mkdirSync('/home/user', { recursive: true });
+        fs.mkdirSync('/bin', { recursive: true });
+        fs.mkdirSync('/usr/bin', { recursive: true });
+        fs.mkdirSync('/tmp', { recursive: true });
+      } catch {
+        // Ignore errors - directories may already exist
+      }
+    }
 
     // Ensure cwd exists in the virtual filesystem
     if (this.cwd !== '/' && fs instanceof VirtualFs) {
@@ -109,11 +130,33 @@ export class BashEnv {
 
   registerCommand(command: Command): void {
     this.commands.set(command.name, command);
+    // Create executable stub in /bin for VirtualFs (only for default layout)
+    if (this.fs instanceof VirtualFs && this.useDefaultLayout) {
+      try {
+        // Create a stub executable file in /bin
+        this.fs.writeFileSync(`/bin/${command.name}`, `#!/bin/bash\n# Built-in command: ${command.name}\n`);
+      } catch {
+        // Ignore errors
+      }
+    }
   }
 
   async exec(commandLine: string): Promise<ExecResult> {
     // Handle empty command
     if (!commandLine.trim()) {
+      return { stdout: '', stderr: '', exitCode: 0 };
+    }
+
+    // Check for if statements
+    const trimmed = commandLine.trim();
+    if (trimmed.startsWith('if ') || trimmed.startsWith('if;') || trimmed === 'if') {
+      return this.executeIfStatement(trimmed);
+    }
+
+    // Check for function definitions
+    const funcDef = this.parseFunctionDefinition(trimmed);
+    if (funcDef) {
+      this.functions.set(funcDef.name, funcDef.body);
       return { stdout: '', stderr: '', exitCode: 0 };
     }
 
@@ -134,6 +177,194 @@ export class BashEnv {
     }
 
     return lastResult;
+  }
+
+  /**
+   * Parse and execute an if statement
+   * Syntax: if CONDITION; then COMMANDS; [elif CONDITION; then COMMANDS;]... [else COMMANDS;] fi
+   */
+  private async executeIfStatement(input: string): Promise<ExecResult> {
+    // Parse the if statement structure
+    const parsed = this.parseIfStatement(input);
+    if (parsed.error) {
+      return { stdout: '', stderr: parsed.error, exitCode: 2 };
+    }
+
+    let stdout = '';
+    let stderr = '';
+    let exitCode = 0;
+
+    // Evaluate conditions in order
+    for (const branch of parsed.branches) {
+      if (branch.condition === null) {
+        // This is the else branch - execute it
+        const result = await this.exec(branch.body);
+        stdout += result.stdout;
+        stderr += result.stderr;
+        exitCode = result.exitCode;
+        break;
+      }
+
+      // Evaluate the condition
+      const condResult = await this.exec(branch.condition);
+      if (condResult.exitCode === 0) {
+        // Condition is true, execute the body
+        const result = await this.exec(branch.body);
+        stdout += result.stdout;
+        stderr += result.stderr;
+        exitCode = result.exitCode;
+        break;
+      }
+    }
+
+    return { stdout, stderr, exitCode };
+  }
+
+  /**
+   * Parse if statement into structured form
+   */
+  private parseIfStatement(input: string): { branches: { condition: string | null; body: string }[]; error?: string } {
+    const branches: { condition: string | null; body: string }[] = [];
+
+    // Tokenize preserving structure
+    let rest = input.trim();
+
+    // Must start with 'if'
+    if (!rest.startsWith('if ') && !rest.startsWith('if;')) {
+      return { branches: [], error: 'bash: syntax error near unexpected token\n' };
+    }
+    rest = rest.slice(2).trim();
+
+    // Parse: CONDITION; then BODY [elif CONDITION; then BODY]* [else BODY] fi
+    let depth = 1;
+    let pos = 0;
+    let state: 'condition' | 'body' = 'condition';
+    let currentCondition = '';
+    let currentBody = '';
+
+    while (pos < rest.length && depth > 0) {
+      // Check for nested if
+      if (rest.slice(pos).match(/^if\s/)) {
+        if (state === 'condition') {
+          currentCondition += 'if ';
+        } else {
+          currentBody += 'if ';
+        }
+        pos += 3;
+        depth++;
+        continue;
+      }
+
+      // Check for fi
+      if (rest.slice(pos).match(/^fi(\s|;|$)/)) {
+        depth--;
+        if (depth === 0) {
+          // End of our if statement
+          if (state === 'body') {
+            branches.push({ condition: currentCondition.trim() || null, body: currentBody.trim() });
+          }
+          break;
+        } else {
+          if (state === 'condition') {
+            currentCondition += 'fi';
+          } else {
+            currentBody += 'fi';
+          }
+          pos += 2;
+          continue;
+        }
+      }
+
+      // Check for 'then' (only at depth 1)
+      if (depth === 1 && rest.slice(pos).match(/^then(\s|;|$)/)) {
+        state = 'body';
+        pos += 4;
+        // Skip semicolon/whitespace
+        while (pos < rest.length && (rest[pos] === ';' || rest[pos] === ' ')) pos++;
+        continue;
+      }
+
+      // Check for 'elif' (only at depth 1)
+      if (depth === 1 && rest.slice(pos).match(/^elif\s/)) {
+        // Save current branch
+        if (currentCondition.trim() || currentBody.trim()) {
+          branches.push({ condition: currentCondition.trim(), body: currentBody.trim() });
+        }
+        currentCondition = '';
+        currentBody = '';
+        state = 'condition';
+        pos += 5;
+        continue;
+      }
+
+      // Check for 'else' (only at depth 1)
+      if (depth === 1 && rest.slice(pos).match(/^else(\s|;|$)/)) {
+        // Save current branch
+        if (currentCondition.trim() || currentBody.trim()) {
+          branches.push({ condition: currentCondition.trim(), body: currentBody.trim() });
+        }
+        currentCondition = '';
+        currentBody = '';
+        // else has no condition
+        state = 'body';
+        pos += 4;
+        // Skip semicolon/whitespace
+        while (pos < rest.length && (rest[pos] === ';' || rest[pos] === ' ')) pos++;
+        // Mark this as else branch (no condition)
+        currentCondition = '';
+        continue;
+      }
+
+      // Regular character
+      if (state === 'condition') {
+        // Handle semicolon before 'then'
+        if (rest[pos] === ';') {
+          pos++;
+          // Skip whitespace
+          while (pos < rest.length && rest[pos] === ' ') pos++;
+          continue;
+        }
+        currentCondition += rest[pos];
+      } else {
+        currentBody += rest[pos];
+      }
+      pos++;
+    }
+
+    // Handle 'else' branch specially
+    if (branches.length > 0 && branches[branches.length - 1].condition === '') {
+      branches[branches.length - 1].condition = null;
+    }
+
+    if (depth !== 0) {
+      return { branches: [], error: 'bash: syntax error: unexpected end of file\n' };
+    }
+
+    if (branches.length === 0) {
+      return { branches: [], error: 'bash: syntax error near unexpected token\n' };
+    }
+
+    return { branches };
+  }
+
+  /**
+   * Parse a function definition
+   * Syntax: function name { commands; } or name() { commands; }
+   */
+  private parseFunctionDefinition(input: string): { name: string; body: string } | null {
+    // Match: function name { ... }
+    const funcKeywordMatch = input.match(/^function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\{(.*)\}\s*$/s);
+    if (funcKeywordMatch) {
+      return { name: funcKeywordMatch[1], body: funcKeywordMatch[2].trim() };
+    }
+
+    // Match: name() { ... }
+    const parenMatch = input.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*\)\s*\{(.*)\}\s*$/s);
+    if (parenMatch) {
+      return { name: parenMatch[1], body: parenMatch[2].trim() };
+    }
+
+    return null;
   }
 
   private async executePipeline(pipeline: Pipeline, initialStdin: string): Promise<ExecResult> {
@@ -195,6 +426,11 @@ export class BashEnv {
       return { stdout: '', stderr: '', exitCode: 0 };
     }
 
+    // Check for compound commands (if statements collected by parser)
+    if (command.startsWith('if ') || command.startsWith('if;')) {
+      return this.executeIfStatement(command);
+    }
+
     // Create glob expander for this execution
     const globExpander = new GlobExpander(this.fs, this.cwd);
 
@@ -216,8 +452,37 @@ export class BashEnv {
       return { stdout: '', stderr: '', exitCode: isNaN(code) ? 1 : code };
     }
 
-    // Look up command
-    const cmd = this.commands.get(command);
+    // Check for user-defined functions first
+    const funcBody = this.functions.get(command);
+    if (funcBody) {
+      // Set positional parameters ($1, $2, etc.)
+      const savedEnv = { ...this.env };
+      for (let i = 0; i < expandedArgs.length; i++) {
+        this.env[String(i + 1)] = expandedArgs[i];
+      }
+      this.env['@'] = expandedArgs.join(' ');
+      this.env['#'] = String(expandedArgs.length);
+
+      // Execute the function body
+      const result = await this.exec(funcBody);
+
+      // Restore environment (but keep any exports)
+      for (let i = 1; i <= expandedArgs.length; i++) {
+        delete this.env[String(i)];
+      }
+      delete this.env['@'];
+      delete this.env['#'];
+
+      return result;
+    }
+
+    // Look up command - handle paths like /bin/ls
+    let commandName = command;
+    if (command.includes('/')) {
+      // Extract the command name from the path
+      commandName = command.split('/').pop() || command;
+    }
+    const cmd = this.commands.get(commandName);
     if (!cmd) {
       return {
         stdout: '',

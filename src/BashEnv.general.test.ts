@@ -531,4 +531,53 @@ describe('BashEnv General', () => {
       expect(result.stdout).toBe('hello world\n');
     });
   });
+
+  describe('default layout', () => {
+    it('should create /home/user as default cwd', async () => {
+      const env = new BashEnv();
+      expect(env.getCwd()).toBe('/home/user');
+    });
+
+    it('should create /bin with command stubs', async () => {
+      const env = new BashEnv();
+      const result = await env.exec('ls /bin');
+      expect(result.stdout).toContain('ls');
+      expect(result.stdout).toContain('cat');
+      expect(result.stdout).toContain('grep');
+      expect(result.stdout).toContain('echo');
+    });
+
+    it('should create /tmp directory', async () => {
+      const env = new BashEnv();
+      const result = await env.exec('ls /tmp');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('should allow running commands via /bin path', async () => {
+      const env = new BashEnv();
+      const result = await env.exec('/bin/echo hello');
+      expect(result.stdout).toBe('hello\n');
+    });
+
+    it('should set HOME to /home/user', async () => {
+      const env = new BashEnv();
+      const result = await env.exec('echo $HOME');
+      expect(result.stdout).toBe('/home/user\n');
+    });
+
+    it('should not create default layout when files are provided', async () => {
+      const env = new BashEnv({ files: { '/test.txt': 'content' } });
+      expect(env.getCwd()).toBe('/');
+      const result = await env.exec('ls /bin');
+      expect(result.exitCode).not.toBe(0); // /bin doesn't exist
+      expect(result.stderr).toContain('No such file or directory');
+    });
+
+    it('should not create default layout when cwd is provided', async () => {
+      const env = new BashEnv({ cwd: '/custom' });
+      const result = await env.exec('ls /bin');
+      expect(result.exitCode).not.toBe(0); // /bin doesn't exist
+      expect(result.stderr).toContain('No such file or directory');
+    });
+  });
 });
