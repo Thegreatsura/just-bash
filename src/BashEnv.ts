@@ -55,6 +55,19 @@ export interface BashEnvOptions {
   commands?: CommandName[];
 }
 
+export interface ExecOptions {
+  /**
+   * Environment variables to set for this execution only.
+   * These are merged with the current environment and restored after execution.
+   */
+  env?: Record<string, string>;
+  /**
+   * Working directory for this execution only.
+   * Restored to original after execution.
+   */
+  cwd?: string;
+}
+
 export class BashEnv {
   readonly fs: IFileSystem;
   private commands: CommandRegistry = new Map();
@@ -154,7 +167,7 @@ export class BashEnv {
     }
   }
 
-  async exec(commandLine: string): Promise<ExecResult> {
+  async exec(commandLine: string, options?: ExecOptions): Promise<ExecResult> {
     if (this.state.callDepth === 0) {
       this.state.commandCount = 0;
     }
@@ -172,6 +185,22 @@ export class BashEnv {
       return { stdout: "", stderr: "", exitCode: 0 };
     }
 
+    // Determine which state to use for execution
+    // If per-exec options are provided, create an isolated state copy
+    // This ensures concurrent exec calls don't interfere with each other
+    const hasPerExecOptions = options?.env || options?.cwd;
+    const execState: InterpreterState = hasPerExecOptions
+      ? {
+          ...this.state,
+          env: { ...this.state.env, ...options?.env },
+          cwd: options?.cwd ?? this.state.cwd,
+          // Deep copy mutable objects to prevent interference
+          functions: new Map(this.state.functions),
+          localScopes: [...this.state.localScopes],
+          options: { ...this.state.options },
+        }
+      : this.state;
+
     // Normalize indented multi-line scripts
     const normalizedLines = commandLine
       .split("\n")
@@ -181,7 +210,7 @@ export class BashEnv {
     try {
       const ast = parse(normalized);
 
-      // Create interpreter with current state
+      // Create interpreter with appropriate state
       const interpreterOptions: InterpreterOptions = {
         fs: this.fs,
         commands: this.commands,
@@ -192,7 +221,7 @@ export class BashEnv {
         fetch: this.secureFetch,
       };
 
-      const interpreter = new Interpreter(interpreterOptions, this.state);
+      const interpreter = new Interpreter(interpreterOptions, execState);
       return await interpreter.executeScript(ast);
     } catch (error) {
       if ((error as ParseException).name === "ParseException") {

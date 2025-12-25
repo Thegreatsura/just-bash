@@ -15,21 +15,36 @@ export class Command {
 
   private bashEnv: BashEnv;
   private cmdLine: string;
+  private env?: Record<string, string>;
+  private explicitCwd: boolean;
   private resultPromise: Promise<ExecResult>;
 
-  constructor(bashEnv: BashEnv, cmdLine: string, cwd: string) {
+  constructor(
+    bashEnv: BashEnv,
+    cmdLine: string,
+    cwd: string,
+    env?: Record<string, string>,
+    explicitCwd = false,
+  ) {
     this.cmdId = crypto.randomUUID();
     this.cwd = cwd;
     this.startedAt = new Date();
     this.bashEnv = bashEnv;
     this.cmdLine = cmdLine;
+    this.env = env;
+    this.explicitCwd = explicitCwd;
 
     // Start execution immediately
     this.resultPromise = this.execute();
   }
 
   private async execute(): Promise<ExecResult> {
-    const result = await this.bashEnv.exec(this.cmdLine);
+    // Only pass options if they were explicitly provided (to avoid creating isolated state unnecessarily)
+    const options =
+      this.env || this.explicitCwd
+        ? { cwd: this.explicitCwd ? this.cwd : undefined, env: this.env }
+        : undefined;
+    const result = await this.bashEnv.exec(this.cmdLine, options);
     this.exitCode = result.exitCode;
     return result;
   }

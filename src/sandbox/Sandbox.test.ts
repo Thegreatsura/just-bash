@@ -65,6 +65,62 @@ describe("Sandbox API", () => {
       const output = await cmd.stdout();
       expect(output.trim()).toBe("/mydir");
     });
+
+    it("should support per-command env option", async () => {
+      const sandbox = await Sandbox.create();
+      const cmd = await sandbox.runCommand("echo $MY_VAR", {
+        env: { MY_VAR: "per-exec-value" },
+      });
+      const output = await cmd.stdout();
+      expect(output.trim()).toBe("per-exec-value");
+    });
+
+    it("should not persist per-command env after execution", async () => {
+      const sandbox = await Sandbox.create();
+
+      // First command with per-exec env
+      const cmd1 = await sandbox.runCommand("echo $MY_VAR", {
+        env: { MY_VAR: "temporary" },
+      });
+      expect((await cmd1.stdout()).trim()).toBe("temporary");
+
+      // Second command without per-exec env - should not have the variable
+      const cmd2 = await sandbox.runCommand("echo $MY_VAR");
+      expect((await cmd2.stdout()).trim()).toBe("");
+    });
+
+    it("should support both cwd and env options together", async () => {
+      const sandbox = await Sandbox.create();
+      await sandbox.mkDir("/app", { recursive: true });
+      const cmd = await sandbox.runCommand('echo "$PWD: $APP_ENV"', {
+        cwd: "/app",
+        env: { APP_ENV: "production" },
+      });
+      const output = await cmd.stdout();
+      expect(output.trim()).toBe("/app: production");
+    });
+
+    it("should restore sandbox state after per-exec options", async () => {
+      const sandbox = await Sandbox.create({
+        cwd: "/",
+        env: { MODE: "original" },
+      });
+      await sandbox.mkDir("/temp", { recursive: true });
+
+      // Run with overrides and wait for completion
+      const overrideCmd = await sandbox.runCommand("echo $MODE", {
+        cwd: "/temp",
+        env: { MODE: "override" },
+      });
+      await overrideCmd.wait(); // Must wait for command to complete and state to restore
+
+      // Verify original state is restored
+      const cwdCmd = await sandbox.runCommand("pwd");
+      expect((await cwdCmd.stdout()).trim()).toBe("/");
+
+      const envCmd = await sandbox.runCommand("echo $MODE");
+      expect((await envCmd.stdout()).trim()).toBe("original");
+    });
   });
 
   describe("Command.stdout()", () => {

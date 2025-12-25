@@ -1,4 +1,4 @@
-export type { BashEnvOptions } from "./BashEnv.js";
+export type { BashEnvOptions, ExecOptions } from "./BashEnv.js";
 export { BashEnv } from "./BashEnv.js";
 export type {
   AllCommandName,

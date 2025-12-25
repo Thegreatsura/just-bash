@@ -49,20 +49,10 @@ export class Sandbox {
     cmd: string,
     opts?: { cwd?: string; env?: Record<string, string> },
   ): Promise<Command> {
-    // If cwd option is provided, cd to it first
-    if (opts?.cwd) {
-      await this.bashEnv.exec(`cd ${opts.cwd}`);
-    }
-
-    // If env options provided, set them temporarily
-    if (opts?.env) {
-      for (const [key, value] of Object.entries(opts.env)) {
-        await this.bashEnv.exec(`export ${key}=${value}`);
-      }
-    }
-
-    const cwd = this.bashEnv.getCwd();
-    return new Command(this.bashEnv, cmd, cwd);
+    // Use per-exec options for cwd and env (they don't persist after the command)
+    const cwd = opts?.cwd ?? this.bashEnv.getCwd();
+    const explicitCwd = opts?.cwd !== undefined;
+    return new Command(this.bashEnv, cmd, cwd, opts?.env, explicitCwd);
   }
 
   async writeFiles(files: WriteFilesInput): Promise<void> {
