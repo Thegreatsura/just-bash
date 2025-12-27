@@ -6,6 +6,25 @@ Designed for AI agents that need a secure, sandboxed bash environment.
 
 Supports optional network access via `curl` with secure-by-default URL filtering.
 
+## Table of Contents
+
+- [Security model](#security-model)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Basic API](#basic-api)
+  - [Configuration](#configuration)
+  - [OverlayFs (Copy-on-Write)](#overlayfs-copy-on-write)
+  - [AI SDK Tool](#ai-sdk-tool)
+  - [Vercel Sandbox Compatible API](#vercel-sandbox-compatible-api)
+  - [CLI Binary](#cli-binary)
+  - [Interactive Shell](#interactive-shell)
+- [Supported Commands](#supported-commands)
+- [Shell Features](#shell-features)
+- [Default Layout](#default-layout)
+- [Network Access](#network-access)
+- [Execution Protection](#execution-protection)
+- [Development](#development)
+
 ## Security model
 
 - The shell only has access to the provided file system.
@@ -302,4 +321,4 @@ pnpm shell       # Run interactive shell
 
 ## License
 
-ISC
+Apache-2.0
