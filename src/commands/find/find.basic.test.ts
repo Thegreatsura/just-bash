@@ -217,4 +217,48 @@ describe("find basic", () => {
       expect(result.exitCode).toBe(0);
     });
   });
+
+  describe("special characters in filenames", () => {
+    it("should find files with spaces in name", async () => {
+      const env = new Bash({
+        files: {
+          "/dir/file with spaces.txt": "content",
+          "/dir/normal.txt": "content",
+        },
+      });
+      const result = await env.exec('find /dir -name "file with spaces.txt"');
+      expect(result.stdout).toBe("/dir/file with spaces.txt\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should find files with tabs in name", async () => {
+      const env = new Bash({
+        files: {
+          "/dir/file\twith\ttabs.txt": "content",
+          "/dir/normal.txt": "content",
+        },
+      });
+      const result = await env.exec('find /dir -name "file\twith\ttabs.txt"');
+      expect(result.stdout).toBe("/dir/file\twith\ttabs.txt\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should find files with special chars using wildcards", async () => {
+      const env = new Bash({
+        files: {
+          "/dir/file with spaces.txt": "content",
+          "/dir/another file.txt": "content",
+          "/dir/normal.txt": "content",
+        },
+      });
+      const result = await env.exec('find /dir -name "* *"');
+      expect(result.stdout).toBe(
+        "/dir/another file.txt\n/dir/file with spaces.txt\n",
+      );
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+  });
 });

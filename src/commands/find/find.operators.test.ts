@@ -279,4 +279,62 @@ describe("find operators", () => {
       expect(result.exitCode).toBe(0);
     });
   });
+
+  describe("complex operator precedence", () => {
+    it("should give AND higher precedence than OR (a OR b AND c)", async () => {
+      const env = new Bash({
+        files: {
+          "/dir/a.txt": "a",
+          "/dir/b.txt": "b",
+          "/dir/c.txt": "c",
+        },
+      });
+      // -name "a.txt" -o -name "b.txt" -name "c.txt"
+      // is parsed as: (-name "a.txt") -o ((-name "b.txt") -and (-name "c.txt"))
+      // Only a.txt matches because no file can match both b.txt AND c.txt
+      const result = await env.exec(
+        'find /dir -type f -name "a.txt" -o -name "b.txt" -name "c.txt"',
+      );
+      expect(result.stdout).toBe("/dir/a.txt\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should handle chained OR with implicit AND", async () => {
+      const env = new Bash({
+        files: {
+          "/dir/a.txt": "a",
+          "/dir/b.txt": "b",
+          "/dir/c.txt": "c",
+          "/dir/d.txt": "d",
+        },
+      });
+      // -name "a.txt" -o -name "b.txt" -o -name "c.txt"
+      // All three files match (OR chain)
+      const result = await env.exec(
+        'find /dir -type f -name "a.txt" -o -name "b.txt" -o -name "c.txt"',
+      );
+      expect(result.stdout).toBe("/dir/a.txt\n/dir/b.txt\n/dir/c.txt\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should override precedence with parentheses", async () => {
+      const env = new Bash({
+        files: {
+          "/dir/a.txt": "a",
+          "/dir/b.txt": "b",
+          "/dir/c.txt": "c",
+        },
+      });
+      // \\( -name "a.txt" -o -name "b.txt" \\) -type f
+      // Both a.txt and b.txt match because parentheses group the OR
+      const result = await env.exec(
+        'find /dir \\( -name "a.txt" -o -name "b.txt" \\) -type f',
+      );
+      expect(result.stdout).toBe("/dir/a.txt\n/dir/b.txt\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+  });
 });

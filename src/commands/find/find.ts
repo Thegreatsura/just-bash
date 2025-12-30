@@ -1,5 +1,10 @@
 import type { Command, CommandContext, ExecResult } from "../../types.js";
 import { hasHelpFlag, showHelp } from "../help.js";
+import {
+  applyWidth,
+  parseWidthPrecision,
+  processEscapes,
+} from "../printf/escapes.js";
 import { collectNewerRefs, evaluateExpressionWithPrune } from "./matcher.js";
 import { parseExpressions } from "./parser.js";
 import type { EvalContext } from "./types.js";
@@ -34,6 +39,7 @@ const findHelp = {
     "-exec CMD {} +   execute CMD with multiple files at once",
     "-print           print the full file name (default action)",
     "-print0          print the full file name followed by a null character",
+    "-printf FORMAT   print FORMAT with directives: %f %h %p %P %s %d %m %M %t",
     "-delete          delete found files/directories",
     "    --help       display this help and exit",
   ],
@@ -138,6 +144,18 @@ export const findCommand: Command = {
     const useDefaultPrint = actions.length === 0;
 
     const results: string[] = [];
+    // Extended results for -printf (stores metadata for each result)
+    const hasPrintfAction = actions.some((a) => a.type === "printf");
+    const printfResults: Array<{
+      path: string;
+      name: string;
+      size: number;
+      mtime: number;
+      mode: number;
+      isDirectory: boolean;
+      depth: number;
+      startingPoint: string;
+    }> = [];
     let stderr = "";
     let exitCode = 0;
 
@@ -251,6 +269,18 @@ export const findCommand: Command = {
 
           if (shouldPrint) {
             results.push(relativePath);
+            if (hasPrintfAction) {
+              printfResults.push({
+                path: relativePath,
+                name,
+                size: stat.size ?? 0,
+                mtime: stat.mtime?.getTime() ?? Date.now(),
+                mode: stat.mode ?? 0o644,
+                isDirectory: stat.isDirectory,
+                depth,
+                startingPoint: searchPath,
+              });
+            }
           }
         };
 
@@ -334,6 +364,12 @@ export const findCommand: Command = {
             break;
           }
 
+          case "printf":
+            for (const r of printfResults) {
+              stdout += formatFindPrintf(action.format, r);
+            }
+            break;
+
           case "exec":
             if (!ctx.exec) {
               return {
@@ -385,3 +421,246 @@ export const findCommand: Command = {
     return { stdout, stderr, exitCode };
   },
 };
+
+/**
+ * Format a find -printf format string
+ * Supported directives (all support optional width/precision like %-20.10f):
+ * %f - file basename (filename without directory)
+ * %h - directory name (dirname)
+ * %p - full path
+ * %P - path without starting point
+ * %s - file size in bytes
+ * %d - depth in directory tree
+ * %m - permissions in octal (without leading 0)
+ * %M - symbolic permissions like -rwxr-xr-x
+ * %t - modification time in ctime format
+ * %T@ - modification time as seconds since epoch
+ * %Tk - modification time with strftime format k
+ * %% - literal %
+ * Also processes escape sequences: \n, \t, etc.
+ */
+function formatFindPrintf(
+  format: string,
+  result: {
+    path: string;
+    name: string;
+    size: number;
+    mtime: number;
+    mode: number;
+    isDirectory: boolean;
+    depth: number;
+    startingPoint: string;
+  },
+): string {
+  // First process escape sequences
+  const processed = processEscapes(format);
+
+  let output = "";
+  let i = 0;
+
+  while (i < processed.length) {
+    if (processed[i] === "%" && i + 1 < processed.length) {
+      i++; // skip %
+
+      // Check for %% first
+      if (processed[i] === "%") {
+        output += "%";
+        i++;
+        continue;
+      }
+
+      // Parse optional width/precision (e.g., %-20.10)
+      const [width, precision, consumed] = parseWidthPrecision(processed, i);
+      i += consumed;
+
+      if (i >= processed.length) {
+        output += "%";
+        break;
+      }
+
+      const directive = processed[i];
+      let value: string;
+
+      switch (directive) {
+        case "f":
+          // Filename (basename)
+          value = result.name;
+          i++;
+          break;
+        case "h": {
+          // Directory (dirname)
+          const lastSlash = result.path.lastIndexOf("/");
+          value = lastSlash > 0 ? result.path.slice(0, lastSlash) : ".";
+          i++;
+          break;
+        }
+        case "p":
+          // Full path
+          value = result.path;
+          i++;
+          break;
+        case "P": {
+          // Path without starting point
+          const sp = result.startingPoint;
+          if (result.path === sp) {
+            value = "";
+          } else if (result.path.startsWith(`${sp}/`)) {
+            value = result.path.slice(sp.length + 1);
+          } else if (sp === "." && result.path.startsWith("./")) {
+            value = result.path.slice(2);
+          } else {
+            value = result.path;
+          }
+          i++;
+          break;
+        }
+        case "s":
+          // File size in bytes
+          value = String(result.size);
+          i++;
+          break;
+        case "d":
+          // Depth in directory tree
+          value = String(result.depth);
+          i++;
+          break;
+        case "m":
+          // Permissions in octal (without leading 0)
+          value = (result.mode & 0o777).toString(8);
+          i++;
+          break;
+        case "M":
+          // Symbolic permissions
+          value = formatSymbolicMode(result.mode, result.isDirectory);
+          i++;
+          break;
+        case "t": {
+          // Modification time in ctime format
+          const date = new Date(result.mtime);
+          value = formatCtimeDate(date);
+          i++;
+          break;
+        }
+        case "T": {
+          // Time format: %T@ for epoch, %TY for year, etc.
+          if (i + 1 < processed.length) {
+            const timeFormat = processed[i + 1];
+            const date = new Date(result.mtime);
+            value = formatTimeDirective(date, timeFormat);
+            i += 2;
+          } else {
+            value = "%T";
+            i++;
+          }
+          break;
+        }
+        default:
+          // Unknown directive, keep as-is
+          output += `%${width !== 0 || precision !== -1 ? `${width}.${precision}` : ""}${directive}`;
+          i++;
+          continue;
+      }
+
+      // Apply width/precision formatting using shared utility
+      output += applyWidth(value, width, precision);
+    } else {
+      output += processed[i];
+      i++;
+    }
+  }
+
+  return output;
+}
+
+/**
+ * Format permissions in symbolic form like -rwxr-xr-x
+ */
+function formatSymbolicMode(mode: number, isDirectory: boolean): string {
+  const perms = mode & 0o777;
+  let result = isDirectory ? "d" : "-";
+
+  // Owner
+  result += perms & 0o400 ? "r" : "-";
+  result += perms & 0o200 ? "w" : "-";
+  result += perms & 0o100 ? "x" : "-";
+
+  // Group
+  result += perms & 0o040 ? "r" : "-";
+  result += perms & 0o020 ? "w" : "-";
+  result += perms & 0o010 ? "x" : "-";
+
+  // Other
+  result += perms & 0o004 ? "r" : "-";
+  result += perms & 0o002 ? "w" : "-";
+  result += perms & 0o001 ? "x" : "-";
+
+  return result;
+}
+
+/**
+ * Format date in ctime format: "Wed Dec 25 12:34:56 2024"
+ */
+function formatCtimeDate(date: Date): string {
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+
+  const day = days[date.getDay()];
+  const month = months[date.getMonth()];
+  const dayNum = String(date.getDate()).padStart(2, " ");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const mins = String(date.getMinutes()).padStart(2, "0");
+  const secs = String(date.getSeconds()).padStart(2, "0");
+  const year = date.getFullYear();
+
+  return `${day} ${month} ${dayNum} ${hours}:${mins}:${secs} ${year}`;
+}
+
+/**
+ * Format time with %T directive format character
+ */
+function formatTimeDirective(date: Date, format: string): string {
+  switch (format) {
+    case "@":
+      // Seconds since epoch (with fractional part)
+      return String(date.getTime() / 1000);
+    case "Y":
+      // Year with century
+      return String(date.getFullYear());
+    case "m":
+      // Month (01-12)
+      return String(date.getMonth() + 1).padStart(2, "0");
+    case "d":
+      // Day of month (01-31)
+      return String(date.getDate()).padStart(2, "0");
+    case "H":
+      // Hour (00-23)
+      return String(date.getHours()).padStart(2, "0");
+    case "M":
+      // Minute (00-59)
+      return String(date.getMinutes()).padStart(2, "0");
+    case "S":
+      // Second (00-59)
+      return String(date.getSeconds()).padStart(2, "0");
+    case "T":
+      // Time as HH:MM:SS
+      return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(date.getSeconds()).padStart(2, "0")}`;
+    case "F":
+      // Date as YYYY-MM-DD
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    default:
+      return `%T${format}`;
+  }
+}

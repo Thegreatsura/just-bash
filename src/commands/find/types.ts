@@ -33,6 +33,7 @@ export type FindAction =
   | { type: "exec"; command: string[]; batchMode: boolean }
   | { type: "print" }
   | { type: "print0" }
+  | { type: "printf"; format: string }
   | { type: "delete" };
 
 // Evaluation context for file matching
@@ -46,6 +47,8 @@ export interface EvalContext {
   size: number; // file size in bytes
   mode: number; // file permission mode
   newerRefTimes: Map<string, number>; // reference file mtimes for -newer
+  depth?: number; // depth in directory tree (for -printf %d)
+  startingPoint?: string; // starting search path (for -printf %P)
 }
 
 // Evaluation result including prune and print flags

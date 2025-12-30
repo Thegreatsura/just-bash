@@ -171,6 +171,9 @@ export function parseExpressions(
       actions.push({ type: "print" });
     } else if (arg === "-print0") {
       actions.push({ type: "print0" });
+    } else if (arg === "-printf" && i + 1 < args.length) {
+      const format = args[++i];
+      actions.push({ type: "printf", format });
     } else if (arg === "-delete") {
       actions.push({ type: "delete" });
     } else if (arg.startsWith("-")) {

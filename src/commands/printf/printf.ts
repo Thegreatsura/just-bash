@@ -2,6 +2,7 @@ import { sprintf } from "sprintf-js";
 import { getErrorMessage } from "../../interpreter/helpers/errors.js";
 import type { Command, CommandContext, ExecResult } from "../../types.js";
 import { hasHelpFlag, showHelp } from "../help.js";
+import { applyWidth, processEscapes } from "./escapes.js";
 
 const printfHelp = {
   name: "printf",
@@ -138,96 +139,6 @@ export const printfCommand: Command = {
     }
   },
 };
-
-/**
- * Process escape sequences in the format string
- */
-function processEscapes(str: string): string {
-  let result = "";
-  let i = 0;
-
-  while (i < str.length) {
-    if (str[i] === "\\" && i + 1 < str.length) {
-      const next = str[i + 1];
-      switch (next) {
-        case "n":
-          result += "\n";
-          i += 2;
-          break;
-        case "t":
-          result += "\t";
-          i += 2;
-          break;
-        case "r":
-          result += "\r";
-          i += 2;
-          break;
-        case "\\":
-          result += "\\";
-          i += 2;
-          break;
-        case "a":
-          result += "\x07";
-          i += 2;
-          break;
-        case "b":
-          result += "\b";
-          i += 2;
-          break;
-        case "f":
-          result += "\f";
-          i += 2;
-          break;
-        case "v":
-          result += "\v";
-          i += 2;
-          break;
-        case "0":
-        case "1":
-        case "2":
-        case "3":
-        case "4":
-        case "5":
-        case "6":
-        case "7": {
-          // Octal escape sequence
-          let octal = "";
-          let j = i + 1;
-          while (j < str.length && j < i + 4 && /[0-7]/.test(str[j])) {
-            octal += str[j];
-            j++;
-          }
-          result += String.fromCharCode(parseInt(octal, 8));
-          i = j;
-          break;
-        }
-        case "x":
-          // Hex escape sequence
-          if (
-            i + 3 < str.length &&
-            /[0-9a-fA-F]{2}/.test(str.slice(i + 2, i + 4))
-          ) {
-            result += String.fromCharCode(
-              parseInt(str.slice(i + 2, i + 4), 16),
-            );
-            i += 4;
-          } else {
-            result += str[i];
-            i++;
-          }
-          break;
-        default:
-          result += str[i];
-          i++;
-      }
-    } else {
-      result += str[i];
-      i++;
-    }
-  }
-
-  return result;
-}
 
 /**
  * Format the string once, consuming args starting at argPos.
@@ -737,26 +648,15 @@ function formatString(spec: string, str: string): string {
   }
 
   const leftJustify = match[1] === "-";
-  const width = match[2] ? parseInt(match[2], 10) : 0;
+  const widthVal = match[2] ? parseInt(match[2], 10) : 0;
   // Precision for strings means max length (truncate)
   // %.s or %0.s means precision 0 (empty string)
   const precision =
     match[3] !== undefined ? (match[4] ? parseInt(match[4], 10) : 0) : -1;
 
-  let result = str;
-  if (precision >= 0 && result.length > precision) {
-    result = result.slice(0, precision);
-  }
-
-  if (width > result.length) {
-    if (leftJustify) {
-      result = result.padEnd(width, " ");
-    } else {
-      result = result.padStart(width, " ");
-    }
-  }
-
-  return result;
+  // Use shared width/alignment utility
+  const width = leftJustify ? -widthVal : widthVal;
+  return applyWidth(str, width, precision);
 }
 
 /**
