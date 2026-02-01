@@ -20,7 +20,7 @@ export function showWelcome(term: Terminal) {
   }
   term.writeln("");
 
-  term.writeln("\x1b[2mA sandboxed bash interpreter for AI agents. Pure TypeScript with in-memory filesystem.\x1b[0m");
+  term.writeln("\x1b[2mA sandboxed bash interpreter for AI agents. Pure TypeScript with in-memory filesystem. From \x1b]8;;https://vercel.com\x07\x1b[4m\x1b[36mVercel Labs\x1b[0m\x1b[2m\x1b]8;;\x07.\x1b[0m");
   term.writeln("");
   term.writeln("  \x1b[1m\x1b[36mnpm install just-bash\x1b[0m");
   term.writeln("");
