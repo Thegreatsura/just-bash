@@ -35,6 +35,7 @@ Keep responses concise. You do not have access to pnpm, npm, or node.`;
 
 export async function POST(req: Request) {
   const { messages } = await req.json();
+  console.log("Agent received messages:", messages);
   const overlayFs = new OverlayFs({ root: AGENT_DATA_DIR, readOnly: true });
   const sandbox = new Bash({ fs: overlayFs, cwd: overlayFs.getMountPoint() });
   const bashToolkit = await createBashTool({
