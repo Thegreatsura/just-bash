@@ -4,7 +4,7 @@
  * Utility functions for path-based operations on query values.
  */
 
-import { isSafeKey, safeSet } from "./safe-object.js";
+import { isSafeKey, nullPrototypeCopy, safeSet } from "./safe-object.js";
 import type { QueryValue } from "./value-operations.js";
 
 /**
@@ -48,13 +48,13 @@ export function setPath(
   // Defense against prototype pollution: skip dangerous keys
   if (!isSafeKey(head)) {
     // Return the value unchanged - silently ignore dangerous keys
-    return value ?? {};
+    return value ?? Object.create(null);
   }
 
   const obj =
     value && typeof value === "object" && !Array.isArray(value)
-      ? { ...value }
-      : {};
+      ? nullPrototypeCopy(value)
+      : Object.create(null);
   // @banned-pattern-ignore: protected by Object.hasOwn() check before access
   const currentVal = Object.hasOwn(obj, head)
     ? (obj as Record<string, unknown>)[head]
@@ -88,8 +88,7 @@ export function deletePath(
       if (!isSafeKey(strKey)) {
         return value;
       }
-      // @banned-pattern-ignore: protected by isSafeKey above
-      const obj = { ...value } as Record<string, unknown>;
+      const obj = nullPrototypeCopy(value);
       delete obj[strKey];
       return obj;
     }
@@ -108,8 +107,7 @@ export function deletePath(
     if (!isSafeKey(strHead)) {
       return value;
     }
-    // @banned-pattern-ignore: protected by isSafeKey above + Object.hasOwn/safeSet
-    const obj = { ...value } as Record<string, unknown>;
+    const obj = nullPrototypeCopy(value);
     if (Object.hasOwn(obj, strHead)) {
       safeSet(obj, strHead, deletePath(obj[strHead], rest));
     }
