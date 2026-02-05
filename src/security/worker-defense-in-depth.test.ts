@@ -488,6 +488,41 @@ describe("WorkerDefenseInDepth", () => {
         expect(error).toBeInstanceOf(WorkerSecurityViolationError);
       });
 
+      it("should block process.mainModule access when it exists (CJS contexts)", () => {
+        // In ESM/workers, process.mainModule is undefined and not blocked
+        // (Node.js internals like createRequire read it during module loading).
+        // We test by temporarily setting mainModule before activation.
+        const origMainModule = (process as unknown as Record<string, unknown>)
+          .mainModule;
+        (process as unknown as Record<string, unknown>).mainModule = {
+          require: () => {},
+        };
+
+        try {
+          defense = new WorkerDefenseInDepth({});
+
+          let error: Error | undefined;
+          try {
+            const _mod = (process as unknown as { mainModule: unknown })
+              .mainModule;
+          } catch (e) {
+            error = e as Error;
+          }
+
+          defense.deactivate();
+          defense = null;
+          expect(error).toBeInstanceOf(WorkerSecurityViolationError);
+          expect(error?.message).toContain("process.mainModule");
+        } finally {
+          if (origMainModule === undefined) {
+            delete (process as unknown as Record<string, unknown>).mainModule;
+          } else {
+            (process as unknown as Record<string, unknown>).mainModule =
+              origMainModule;
+          }
+        }
+      });
+
       it("should block process.dlopen calls", () => {
         defense = new WorkerDefenseInDepth({});
 
@@ -530,6 +565,36 @@ describe("WorkerDefenseInDepth", () => {
 
         defense.deactivate();
         expect(error).toBeInstanceOf(WorkerSecurityViolationError);
+      });
+
+      it("should block SharedArrayBuffer", () => {
+        defense = new WorkerDefenseInDepth({});
+
+        let error: Error | undefined;
+        try {
+          new SharedArrayBuffer(1024);
+        } catch (e) {
+          error = e as Error;
+        }
+
+        defense.deactivate();
+        expect(error).toBeInstanceOf(WorkerSecurityViolationError);
+        expect(error?.message).toContain("SharedArrayBuffer");
+      });
+
+      it("should block Atomics access", () => {
+        defense = new WorkerDefenseInDepth({});
+
+        let error: Error | undefined;
+        try {
+          Atomics.wait;
+        } catch (e) {
+          error = e as Error;
+        }
+
+        defense.deactivate();
+        expect(error).toBeInstanceOf(WorkerSecurityViolationError);
+        expect(error?.message).toContain("Atomics");
       });
 
       it("should freeze Reflect (not block it)", () => {
