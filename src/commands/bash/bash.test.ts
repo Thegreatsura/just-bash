@@ -237,5 +237,16 @@ cat /tmp/test.txt`,
       expect(result.stdout).toBe("line2\n");
       expect(result.exitCode).toBe(0);
     });
+
+    it("should handle command substitution with grep and head in piped bash -c", async () => {
+      const env = new Bash();
+      // This test demonstrates a bug where grep with no matches followed by head
+      // incorrectly passes through the original stdin instead of empty output
+      const result = await env.exec(
+        'echo "test" | bash -c \'RESULT=$(cat | grep "nomatch" | head -1); echo "RESULT=[$RESULT]"\'',
+      );
+      expect(result.stdout).toBe("RESULT=[]\n");
+      expect(result.exitCode).toBe(0);
+    });
   });
 });
