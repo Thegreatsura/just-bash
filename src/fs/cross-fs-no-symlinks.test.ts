@@ -20,6 +20,7 @@ import { ReadWriteFs } from "./read-write-fs/read-write-fs.js";
 
 interface TestContext {
   tempDir: string;
+  outsideDir: string;
   fsImpl: IFileSystem;
 }
 
@@ -56,6 +57,7 @@ describe.each([
 
   beforeEach(() => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "nosym-"));
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "nosym-out-"));
     fs.writeFileSync(path.join(tempDir, "real.txt"), "real content");
     fs.mkdirSync(path.join(tempDir, "subdir"));
     fs.writeFileSync(
@@ -72,12 +74,18 @@ describe.each([
       path.join(tempDir, "subdir"),
       path.join(tempDir, "link-to-subdir"),
     );
+    // Create a broken symlink pointing outside the sandbox (target doesn't exist)
+    fs.symlinkSync(
+      path.join(outsideDir, "nonexistent.txt"),
+      path.join(tempDir, "broken-escape-link"),
+    );
 
-    ctx = { tempDir, fsImpl: factory(tempDir) };
+    ctx = { tempDir, outsideDir, fsImpl: factory(tempDir) };
   });
 
   afterEach(() => {
     fs.rmSync(ctx.tempDir, { recursive: true, force: true });
+    fs.rmSync(ctx.outsideDir, { recursive: true, force: true });
   });
 
   // -----------------------------------------------------------------------
@@ -88,6 +96,42 @@ describe.each([
       await expect(
         ctx.fsImpl.symlink("/real.txt", "/new-link"),
       ).rejects.toThrow("EPERM");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // broken symlink write escape prevention
+  // -----------------------------------------------------------------------
+  describe("broken symlink write escape", () => {
+    it("should reject writeFile through a broken symlink pointing outside", async () => {
+      // This is the critical test: a broken symlink (target doesn't exist)
+      // pointing outside the sandbox. Without the lstatSync defense-in-depth
+      // check, writeFile would follow the symlink and create the target file
+      // outside the sandbox.
+      if (_name === "OverlayFs") {
+        // OverlayFs writes to memory, so this doesn't apply — but symlink()
+        // is still blocked, so writeFile through the link won't work either.
+        // The readFile test below covers OverlayFs's rejection.
+        return;
+      }
+      await expect(
+        ctx.fsImpl.writeFile("/broken-escape-link", "pwned"),
+      ).rejects.toThrow();
+
+      // Verify the target file was NOT created outside the sandbox
+      expect(fs.existsSync(path.join(ctx.outsideDir, "nonexistent.txt"))).toBe(
+        false,
+      );
+    });
+
+    it("should reject readFile through a broken symlink pointing outside", async () => {
+      await expect(
+        ctx.fsImpl.readFile("/broken-escape-link"),
+      ).rejects.toThrow();
+    });
+
+    it("should reject stat through a broken symlink pointing outside", async () => {
+      await expect(ctx.fsImpl.stat("/broken-escape-link")).rejects.toThrow();
     });
   });
 
@@ -236,7 +280,7 @@ describe.each([
       path.join(tempDir, "link.txt"),
     );
 
-    ctx = { tempDir, fsImpl: factory(tempDir) };
+    ctx = { tempDir, outsideDir: "", fsImpl: factory(tempDir) };
   });
 
   afterEach(() => {

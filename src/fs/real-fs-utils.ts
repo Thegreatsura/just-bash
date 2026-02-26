@@ -134,6 +134,23 @@ export function resolveCanonicalPathNoSymlinks(
     return null; // symlink was traversed
   }
 
+  // Defense-in-depth: detect broken symlinks at the leaf component.
+  // resolveCanonicalPath's ENOENT walk-up masks broken symlinks: when
+  // realpathSync follows a symlink whose target doesn't exist, it returns
+  // ENOENT and the walk-up appends the literal basename — making the
+  // relative paths match even though the leaf IS a symlink.  Without this
+  // check, writeFile through a broken symlink pointing outside the sandbox
+  // would follow the link and create the target file.
+  try {
+    const stat = fs.lstatSync(resolvedReal);
+    if (stat.isSymbolicLink()) {
+      return null; // broken symlink at the leaf
+    }
+  } catch {
+    // ENOENT: path truly doesn't exist (not a symlink entry) — safe,
+    // any subsequent write creates a new file within the sandbox.
+  }
+
   return canonical;
 }
 
