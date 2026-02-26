@@ -637,6 +637,24 @@ describe.each([
       expect(fs.existsSync(path.join(ctx.outsideDir, "pwned.txt"))).toBe(false);
     });
 
+    it("writeFile through broken symlink never creates file outside sandbox", async () => {
+      // A broken symlink (target doesn't exist) pointing outside the sandbox.
+      // The target's parent exists, so writeFile following the symlink could
+      // create the target file outside the sandbox.
+      const brokenTarget = path.join(ctx.outsideDir, "broken-target.txt");
+      try {
+        fs.symlinkSync(brokenTarget, path.join(ctx.tempDir, "broken-escape"));
+      } catch {
+        return;
+      }
+      try {
+        await ctx.fsImpl.writeFile("/broken-escape", "PWNED");
+      } catch {
+        // Expected for ReadWriteFs
+      }
+      expect(fs.existsSync(brokenTarget)).toBe(false);
+    });
+
     it("blocks stat when parent dir is OS symlink to outside", async () => {
       try {
         fs.symlinkSync(ctx.outsideDir, path.join(ctx.tempDir, "sesc-dir"));

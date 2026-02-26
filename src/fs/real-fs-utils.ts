@@ -100,6 +100,34 @@ export function resolveCanonicalPath(
       if (parent === realPath) return null;
       const parentCanon = resolveCanonicalPath(parent, canonicalRoot);
       if (parentCanon === null) return null;
+
+      // Defense-in-depth: the leaf component might be a broken symlink
+      // whose target doesn't exist (causing the ENOENT above).
+      // realpathSync tried to follow it, failed, and we walked up.
+      // Check with lstatSync (which doesn't follow symlinks) whether
+      // the leaf is a symlink, and if so, validate its target stays
+      // within the sandbox by recursing through resolveCanonicalPath
+      // (which handles root canonicalization and ENOENT walk-up).
+      try {
+        const leafStat = fs.lstatSync(realPath);
+        if (leafStat.isSymbolicLink()) {
+          const target = fs.readlinkSync(realPath);
+          const resolvedTarget = nodePath.isAbsolute(target)
+            ? target
+            : nodePath.resolve(nodePath.dirname(realPath), target);
+          const validatedTarget = resolveCanonicalPath(
+            resolvedTarget,
+            canonicalRoot,
+          );
+          if (validatedTarget === null) {
+            return null;
+          }
+        }
+      } catch {
+        // lstatSync ENOENT: the leaf truly doesn't exist (not a symlink
+        // entry on disk), so the walk-up basename is correct.
+      }
+
       return nodePath.join(parentCanon, nodePath.basename(realPath));
     }
     return null;
