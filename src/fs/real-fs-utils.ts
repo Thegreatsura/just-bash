@@ -78,6 +78,35 @@ export function validateRealPath(
 }
 
 /**
+ * Resolve a real filesystem path to its canonical form and verify it stays
+ * within the sandbox root.  Returns the canonical path on success, or `null`
+ * if the path escapes the root (fail-closed on unexpected errors).
+ *
+ * Unlike `validateRealPath` (which returns a boolean), this function returns
+ * the canonical path so callers can use it for subsequent I/O, closing the
+ * TOCTOU gap where the original (unresolved) path could be swapped between
+ * validation and use.
+ */
+export function resolveCanonicalPath(
+  realPath: string,
+  canonicalRoot: string,
+): string | null {
+  try {
+    const resolved = fs.realpathSync(realPath);
+    return isPathWithinRoot(resolved, canonicalRoot) ? resolved : null;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      const parent = nodePath.dirname(realPath);
+      if (parent === realPath) return null;
+      const parentCanon = resolveCanonicalPath(parent, canonicalRoot);
+      if (parentCanon === null) return null;
+      return nodePath.join(parentCanon, nodePath.basename(realPath));
+    }
+    return null;
+  }
+}
+
+/**
  * Validate that a root directory exists and is actually a directory.
  * Throws with a descriptive message including `fsName` (e.g. "OverlayFs",
  * "ReadWriteFs") on failure.

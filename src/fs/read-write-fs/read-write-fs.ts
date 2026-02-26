@@ -29,8 +29,8 @@ import type {
 import {
   isPathWithinRoot,
   normalizePath,
+  resolveCanonicalPath,
   validatePath,
-  validateRealPath,
   validateRootDirectory,
 } from "../real-fs-utils.js";
 
@@ -66,25 +66,31 @@ export class ReadWriteFs implements IFileSystem {
   }
 
   /**
-   * Validate that a resolved real path stays within the sandbox root.
-   * Resolves all symlinks to detect escape attempts via OS-level symlinks.
+   * Validate that a resolved real path stays within the sandbox root and
+   * return the canonical (symlink-resolved) path for use in subsequent I/O.
+   * This closes the TOCTOU gap where the original path could be swapped
+   * between validation and use.
    * Throws EACCES if the path escapes the root.
    */
-  private resolveAndValidate(realPath: string, virtualPath: string): void {
-    if (!validateRealPath(realPath, this.canonicalRoot)) {
+  private resolveAndValidate(realPath: string, virtualPath: string): string {
+    const canonical = resolveCanonicalPath(realPath, this.canonicalRoot);
+    if (canonical === null) {
       throw new Error(
         `EACCES: permission denied, '${virtualPath}' resolves outside sandbox`,
       );
     }
+    return canonical;
   }
 
   /**
    * Validate the parent directory of a path (for operations like lstat/readlink
    * that should not follow the final component's symlink).
+   * Returns the canonical parent joined with the original basename.
    */
-  private validateParent(realPath: string, virtualPath: string): void {
+  private validateParent(realPath: string, virtualPath: string): string {
     const parent = nodePath.dirname(realPath);
-    this.resolveAndValidate(parent, virtualPath);
+    const canonicalParent = this.resolveAndValidate(parent, virtualPath);
+    return nodePath.join(canonicalParent, nodePath.basename(realPath));
   }
 
   /**
@@ -108,7 +114,7 @@ export class ReadWriteFs implements IFileSystem {
   async readFileBuffer(path: string): Promise<Uint8Array> {
     validatePath(path, "open");
     const realPath = this.toRealPath(path);
-    this.resolveAndValidate(realPath, path);
+    const canonical = this.resolveAndValidate(realPath, path);
 
     try {
       if (this.maxFileReadSize > 0) {
@@ -116,14 +122,14 @@ export class ReadWriteFs implements IFileSystem {
         // size. lstat would return the symlink's target path length, bypassing
         // the size limit for symlinks pointing to large files.
         // resolveAndValidate already confirmed the resolved path is within sandbox.
-        const stat = await fs.promises.stat(realPath);
+        const stat = await fs.promises.stat(canonical);
         if (stat.size > this.maxFileReadSize) {
           throw new Error(
             `EFBIG: file too large, read '${path}' (${stat.size} bytes, max ${this.maxFileReadSize})`,
           );
         }
       }
-      const content = await fs.promises.readFile(realPath);
+      const content = await fs.promises.readFile(canonical);
       return new Uint8Array(content);
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
@@ -135,7 +141,7 @@ export class ReadWriteFs implements IFileSystem {
           `EISDIR: illegal operation on a directory, read '${path}'`,
         );
       }
-      throw e;
+      this.sanitizeError(e, path, "open");
     }
   }
 
@@ -146,15 +152,15 @@ export class ReadWriteFs implements IFileSystem {
   ): Promise<void> {
     validatePath(path, "write");
     const realPath = this.toRealPath(path);
-    this.resolveAndValidate(realPath, path);
+    const canonical = this.resolveAndValidate(realPath, path);
     const encoding = getEncoding(options);
     const buffer = toBuffer(content, encoding);
 
     // Ensure parent directory exists
-    const dir = nodePath.dirname(realPath);
+    const dir = nodePath.dirname(canonical);
     await fs.promises.mkdir(dir, { recursive: true });
 
-    await fs.promises.writeFile(realPath, buffer);
+    await fs.promises.writeFile(canonical, buffer);
   }
 
   async appendFile(
@@ -164,22 +170,22 @@ export class ReadWriteFs implements IFileSystem {
   ): Promise<void> {
     validatePath(path, "append");
     const realPath = this.toRealPath(path);
-    this.resolveAndValidate(realPath, path);
+    const canonical = this.resolveAndValidate(realPath, path);
     const encoding = getEncoding(options);
     const buffer = toBuffer(content, encoding);
 
     // Ensure parent directory exists
-    const dir = nodePath.dirname(realPath);
+    const dir = nodePath.dirname(canonical);
     await fs.promises.mkdir(dir, { recursive: true });
 
-    await fs.promises.appendFile(realPath, buffer);
+    await fs.promises.appendFile(canonical, buffer);
   }
 
   async exists(path: string): Promise<boolean> {
     const realPath = this.toRealPath(path);
     try {
-      this.resolveAndValidate(realPath, path);
-      await fs.promises.access(realPath);
+      const canonical = this.resolveAndValidate(realPath, path);
+      await fs.promises.access(canonical);
       return true;
     } catch {
       return false;
@@ -189,10 +195,10 @@ export class ReadWriteFs implements IFileSystem {
   async stat(path: string): Promise<FsStat> {
     validatePath(path, "stat");
     const realPath = this.toRealPath(path);
-    this.resolveAndValidate(realPath, path);
+    const canonical = this.resolveAndValidate(realPath, path);
 
     try {
-      const stat = await fs.promises.stat(realPath);
+      const stat = await fs.promises.stat(canonical);
       return {
         isFile: stat.isFile(),
         isDirectory: stat.isDirectory(),
@@ -206,17 +212,17 @@ export class ReadWriteFs implements IFileSystem {
       if (err.code === "ENOENT") {
         throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
       }
-      throw e;
+      this.sanitizeError(e, path, "stat");
     }
   }
 
   async lstat(path: string): Promise<FsStat> {
     validatePath(path, "lstat");
     const realPath = this.toRealPath(path);
-    this.validateParent(realPath, path);
+    const canonical = this.validateParent(realPath, path);
 
     try {
-      const stat = await fs.promises.lstat(realPath);
+      const stat = await fs.promises.lstat(canonical);
       return {
         isFile: stat.isFile(),
         isDirectory: stat.isDirectory(),
@@ -230,17 +236,17 @@ export class ReadWriteFs implements IFileSystem {
       if (err.code === "ENOENT") {
         throw new Error(`ENOENT: no such file or directory, lstat '${path}'`);
       }
-      throw e;
+      this.sanitizeError(e, path, "lstat");
     }
   }
 
   async mkdir(path: string, options?: MkdirOptions): Promise<void> {
     validatePath(path, "mkdir");
     const realPath = this.toRealPath(path);
-    this.resolveAndValidate(realPath, path);
+    const canonical = this.resolveAndValidate(realPath, path);
 
     try {
-      await fs.promises.mkdir(realPath, { recursive: options?.recursive });
+      await fs.promises.mkdir(canonical, { recursive: options?.recursive });
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
       if (err.code === "EEXIST") {
@@ -249,7 +255,7 @@ export class ReadWriteFs implements IFileSystem {
       if (err.code === "ENOENT") {
         throw new Error(`ENOENT: no such file or directory, mkdir '${path}'`);
       }
-      throw e;
+      this.sanitizeError(e, path, "mkdir");
     }
   }
 
@@ -261,10 +267,10 @@ export class ReadWriteFs implements IFileSystem {
   async readdirWithFileTypes(path: string): Promise<DirentEntry[]> {
     validatePath(path, "scandir");
     const realPath = this.toRealPath(path);
-    this.resolveAndValidate(realPath, path);
+    const canonical = this.resolveAndValidate(realPath, path);
 
     try {
-      const entries = await fs.promises.readdir(realPath, {
+      const entries = await fs.promises.readdir(canonical, {
         withFileTypes: true,
       });
       return entries
@@ -283,17 +289,17 @@ export class ReadWriteFs implements IFileSystem {
       if (err.code === "ENOTDIR") {
         throw new Error(`ENOTDIR: not a directory, scandir '${path}'`);
       }
-      throw e;
+      this.sanitizeError(e, path, "scandir");
     }
   }
 
   async rm(path: string, options?: RmOptions): Promise<void> {
     validatePath(path, "rm");
     const realPath = this.toRealPath(path);
-    this.resolveAndValidate(realPath, path);
+    const canonical = this.resolveAndValidate(realPath, path);
 
     try {
-      await fs.promises.rm(realPath, {
+      await fs.promises.rm(canonical, {
         recursive: options?.recursive ?? false,
         force: options?.force ?? false,
       });
@@ -305,7 +311,7 @@ export class ReadWriteFs implements IFileSystem {
       if (err.code === "ENOTEMPTY") {
         throw new Error(`ENOTEMPTY: directory not empty, rm '${path}'`);
       }
-      throw e;
+      this.sanitizeError(e, path, "rm");
     }
   }
 
@@ -314,11 +320,11 @@ export class ReadWriteFs implements IFileSystem {
     validatePath(dest, "cp");
     const srcReal = this.toRealPath(src);
     const destReal = this.toRealPath(dest);
-    this.resolveAndValidate(srcReal, src);
-    this.resolveAndValidate(destReal, dest);
+    const srcCanonical = this.resolveAndValidate(srcReal, src);
+    const destCanonical = this.resolveAndValidate(destReal, dest);
 
     try {
-      await fs.promises.cp(srcReal, destReal, {
+      await fs.promises.cp(srcCanonical, destCanonical, {
         recursive: options?.recursive ?? false,
         // Validate each entry during recursive copy to prevent:
         // 1. Following symlinks that point outside the sandbox
@@ -348,25 +354,28 @@ export class ReadWriteFs implements IFileSystem {
       if (err.code === "EISDIR") {
         throw new Error(`EISDIR: is a directory, cp '${src}'`);
       }
-      throw e;
+      this.sanitizeError(e, src, "cp");
     }
   }
 
   async mv(src: string, dest: string): Promise<void> {
     const srcReal = this.toRealPath(src);
     const destReal = this.toRealPath(dest);
-    this.resolveAndValidate(srcReal, src);
-    this.resolveAndValidate(destReal, dest);
+    // Use validateParent (not resolveAndValidate) because rename() operates on
+    // directory entries — it does NOT follow the final symlink component.
+    // resolveAndValidate would resolve through symlinks, breaking symlink moves.
+    const srcCanonical = this.validateParent(srcReal, src);
+    const destCanonical = this.validateParent(destReal, dest);
 
     // Check if source is a symlink - if so, validate that its target
     // will still be valid after the move (prevents mv+symlink escape)
     try {
-      const srcStat = await fs.promises.lstat(srcReal);
+      const srcStat = await fs.promises.lstat(srcCanonical);
       if (srcStat.isSymbolicLink()) {
-        const target = await fs.promises.readlink(srcReal);
+        const target = await fs.promises.readlink(srcCanonical);
         // Resolve the target relative to the destination location
         const resolvedTarget = nodePath.resolve(
-          nodePath.dirname(destReal),
+          nodePath.dirname(destCanonical),
           target,
         );
         const canonicalTarget = await fs.promises
@@ -393,11 +402,11 @@ export class ReadWriteFs implements IFileSystem {
     }
 
     // Ensure destination parent directory exists
-    const destDir = nodePath.dirname(destReal);
+    const destDir = nodePath.dirname(destCanonical);
     await fs.promises.mkdir(destDir, { recursive: true });
 
     try {
-      await fs.promises.rename(srcReal, destReal);
+      await fs.promises.rename(srcCanonical, destCanonical);
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
       if (err.code === "ENOENT") {
@@ -409,7 +418,32 @@ export class ReadWriteFs implements IFileSystem {
         await this.rm(src, { recursive: true });
         return;
       }
-      throw e;
+      this.sanitizeError(e, src, "mv");
+    }
+
+    // Fix 2: After a successful directory rename, recursively scan the
+    // destination for symlinks that now escape the sandbox. If any are found,
+    // undo the move to prevent the escape.
+    try {
+      const destStat = fs.lstatSync(destCanonical);
+      if (destStat.isDirectory()) {
+        const escaping = this.findEscapingSymlinks(destCanonical);
+        if (escaping.length > 0) {
+          // Undo the move
+          await fs.promises.rename(destCanonical, srcCanonical);
+          throw new Error(
+            `EACCES: permission denied, mv '${src}' -> '${dest}' would create symlinks escaping sandbox`,
+          );
+        }
+      }
+    } catch (e) {
+      if (
+        (e as Error).message?.includes("EACCES") ||
+        (e as Error).message?.includes("escaping sandbox")
+      ) {
+        throw e;
+      }
+      // Ignore stat errors (e.g., dest is a file not a directory)
     }
   }
 
@@ -426,6 +460,65 @@ export class ReadWriteFs implements IFileSystem {
     const paths: string[] = [];
     this.scanDir("/", paths);
     return paths;
+  }
+
+  /**
+   * Sanitize an error to prevent leaking real OS paths in error messages.
+   * Replaces the original error with one containing only the virtual path.
+   */
+  private sanitizeError(
+    e: unknown,
+    virtualPath: string,
+    operation: string,
+  ): never {
+    const err = e as NodeJS.ErrnoException;
+    if (
+      err.message?.includes("EACCES") ||
+      err.message?.includes("escaping sandbox") ||
+      err.message?.includes("EFBIG")
+    ) {
+      // These are our own errors with virtual paths — rethrow as-is
+      throw e;
+    }
+    const code = err.code || "EIO";
+    throw new Error(`${code}: ${operation} '${virtualPath}'`);
+  }
+
+  /**
+   * Recursively scan a directory for symlinks whose targets escape the sandbox.
+   * Returns an array of paths (real OS paths) for any escaping symlinks found.
+   */
+  private findEscapingSymlinks(dir: string): string[] {
+    const escaping: string[] = [];
+    try {
+      const entries = fs.readdirSync(dir);
+      for (const entry of entries) {
+        const entryPath = nodePath.join(dir, entry);
+        try {
+          const stat = fs.lstatSync(entryPath);
+          if (stat.isSymbolicLink()) {
+            const target = fs.readlinkSync(entryPath);
+            const resolvedTarget = nodePath.resolve(dir, target);
+            let canonicalTarget: string;
+            try {
+              canonicalTarget = fs.realpathSync(resolvedTarget);
+            } catch {
+              canonicalTarget = resolvedTarget;
+            }
+            if (!isPathWithinRoot(canonicalTarget, this.canonicalRoot)) {
+              escaping.push(entryPath);
+            }
+          } else if (stat.isDirectory()) {
+            escaping.push(...this.findEscapingSymlinks(entryPath));
+          }
+        } catch {
+          // Skip entries we can't stat
+        }
+      }
+    } catch {
+      // Skip directories we can't read
+    }
+    return escaping;
   }
 
   private scanDir(virtualDir: string, paths: string[]): void {
@@ -454,16 +547,16 @@ export class ReadWriteFs implements IFileSystem {
   async chmod(path: string, mode: number): Promise<void> {
     validatePath(path, "chmod");
     const realPath = this.toRealPath(path);
-    this.resolveAndValidate(realPath, path);
+    const canonical = this.resolveAndValidate(realPath, path);
 
     try {
-      await fs.promises.chmod(realPath, mode);
+      await fs.promises.chmod(canonical, mode);
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
       if (err.code === "ENOENT") {
         throw new Error(`ENOENT: no such file or directory, chmod '${path}'`);
       }
-      throw e;
+      this.sanitizeError(e, path, "chmod");
     }
   }
 
@@ -472,7 +565,7 @@ export class ReadWriteFs implements IFileSystem {
     const realLinkPath = this.toRealPath(linkPath);
     // Validate that the link path's parent stays within sandbox
     // (prevents creating symlinks outside via pre-existing OS symlinks in parent path)
-    this.validateParent(realLinkPath, linkPath);
+    const canonicalLinkPath = this.validateParent(realLinkPath, linkPath);
 
     // Validate and transform symlink target to prevent sandbox escape.
     // Resolve the target: if absolute, treat as virtual path; if relative, resolve from link's dir
@@ -482,24 +575,26 @@ export class ReadWriteFs implements IFileSystem {
       ? normalizePath(target)
       : normalizePath(linkDir === "/" ? `/${target}` : `${linkDir}/${target}`);
 
-    // Convert to real path - this is where the symlink should actually point
-    const resolvedRealTarget = nodePath.join(this.root, resolvedVirtualTarget);
+    // Convert to real path - this is where the symlink should actually point.
+    // Use canonicalRoot (not this.root) so the relative path computation is
+    // consistent with the canonical link directory (avoids /tmp vs /private/tmp mismatch).
+    const resolvedRealTarget = nodePath.join(this.canonicalRoot, resolvedVirtualTarget);
 
     // For relative symlinks, compute the correct relative path from link to target within root
     // For absolute symlinks, use the absolute path within root
-    const realLinkDir = nodePath.dirname(realLinkPath);
+    const canonicalLinkDir = nodePath.dirname(canonicalLinkPath);
     const safeTarget = target.startsWith("/")
       ? resolvedRealTarget
-      : nodePath.relative(realLinkDir, resolvedRealTarget);
+      : nodePath.relative(canonicalLinkDir, resolvedRealTarget);
 
     try {
-      await fs.promises.symlink(safeTarget, realLinkPath);
+      await fs.promises.symlink(safeTarget, canonicalLinkPath);
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
       if (err.code === "EEXIST") {
         throw new Error(`EEXIST: file already exists, symlink '${linkPath}'`);
       }
-      throw e;
+      this.sanitizeError(e, linkPath, "symlink");
     }
   }
 
@@ -508,11 +603,14 @@ export class ReadWriteFs implements IFileSystem {
     validatePath(newPath, "link");
     const realExisting = this.toRealPath(existingPath);
     const realNew = this.toRealPath(newPath);
-    this.resolveAndValidate(realExisting, existingPath);
-    this.resolveAndValidate(realNew, newPath);
+    const canonicalExisting = this.resolveAndValidate(
+      realExisting,
+      existingPath,
+    );
+    const canonicalNew = this.resolveAndValidate(realNew, newPath);
 
     try {
-      await fs.promises.link(realExisting, realNew);
+      await fs.promises.link(canonicalExisting, canonicalNew);
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
       if (err.code === "ENOENT") {
@@ -528,17 +626,17 @@ export class ReadWriteFs implements IFileSystem {
           `EPERM: operation not permitted, link '${existingPath}'`,
         );
       }
-      throw e;
+      this.sanitizeError(e, existingPath, "link");
     }
   }
 
   async readlink(path: string): Promise<string> {
     validatePath(path, "readlink");
     const realPath = this.toRealPath(path);
-    this.validateParent(realPath, path);
+    const canonical = this.validateParent(realPath, path);
 
     try {
-      const rawTarget = await fs.promises.readlink(realPath);
+      const rawTarget = await fs.promises.readlink(canonical);
 
       // Convert the raw OS target to a virtual path to prevent
       // leaking real filesystem paths outside the sandbox.
@@ -548,7 +646,7 @@ export class ReadWriteFs implements IFileSystem {
       // Resolve the raw target to an absolute real path
       const resolvedRealTarget = nodePath.isAbsolute(rawTarget)
         ? rawTarget
-        : nodePath.resolve(nodePath.dirname(realPath), rawTarget);
+        : nodePath.resolve(nodePath.dirname(canonical), rawTarget);
       const canonicalTarget = await fs.promises
         .realpath(resolvedRealTarget)
         .catch(() => resolvedRealTarget);
@@ -586,7 +684,7 @@ export class ReadWriteFs implements IFileSystem {
       if (err.code === "EINVAL") {
         throw new Error(`EINVAL: invalid argument, readlink '${path}'`);
       }
-      throw e;
+      this.sanitizeError(e, path, "readlink");
     }
   }
 
@@ -598,18 +696,9 @@ export class ReadWriteFs implements IFileSystem {
     validatePath(path, "realpath");
     const realPath = this.toRealPath(path);
 
+    let resolved: string;
     try {
-      const resolved = await fs.promises.realpath(realPath);
-      // Convert back to virtual path (relative to root)
-      // Use canonicalRoot (computed at construction) for consistent comparison
-      // with resolveAndValidate. Use boundary-safe prefix check to prevent
-      // /data matching /datastore.
-      if (isPathWithinRoot(resolved, this.canonicalRoot)) {
-        const relative = resolved.slice(this.canonicalRoot.length);
-        return relative || "/";
-      }
-      // Resolved path is outside root - reject it to prevent sandbox escape
-      throw new Error(`ENOENT: no such file or directory, realpath '${path}'`);
+      resolved = await fs.promises.realpath(realPath);
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
       if (err.code === "ENOENT") {
@@ -622,8 +711,19 @@ export class ReadWriteFs implements IFileSystem {
           `ELOOP: too many levels of symbolic links, realpath '${path}'`,
         );
       }
-      throw e;
+      this.sanitizeError(e, path, "realpath");
     }
+
+    // Convert back to virtual path (relative to root)
+    // Use canonicalRoot (computed at construction) for consistent comparison
+    // with resolveAndValidate. Use boundary-safe prefix check to prevent
+    // /data matching /datastore.
+    if (isPathWithinRoot(resolved, this.canonicalRoot)) {
+      const relative = resolved.slice(this.canonicalRoot.length);
+      return relative || "/";
+    }
+    // Resolved path is outside root - reject it to prevent sandbox escape
+    throw new Error(`ENOENT: no such file or directory, realpath '${path}'`);
   }
 
   /**
@@ -635,16 +735,16 @@ export class ReadWriteFs implements IFileSystem {
   async utimes(path: string, atime: Date, mtime: Date): Promise<void> {
     validatePath(path, "utimes");
     const realPath = this.toRealPath(path);
-    this.resolveAndValidate(realPath, path);
+    const canonical = this.resolveAndValidate(realPath, path);
 
     try {
-      await fs.promises.utimes(realPath, atime, mtime);
+      await fs.promises.utimes(canonical, atime, mtime);
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
       if (err.code === "ENOENT") {
         throw new Error(`ENOENT: no such file or directory, utimes '${path}'`);
       }
-      throw e;
+      this.sanitizeError(e, path, "utimes");
     }
   }
 }

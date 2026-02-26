@@ -1027,4 +1027,184 @@ describe("ReadWriteFs Security - Path Traversal Prevention", () => {
       await expect(rwfs.cp("/cp-sym-escape", "/stolen.txt")).rejects.toThrow();
     });
   });
+
+  describe("mv directory with nested escape symlinks (Fix 2)", () => {
+    it("should block mv of directory containing nested symlink that escapes", async () => {
+      // Create a directory with a nested symlink pointing outside
+      fs.mkdirSync(path.join(tempDir, "src-dir", "nested"), {
+        recursive: true,
+      });
+      fs.writeFileSync(
+        path.join(tempDir, "src-dir", "safe.txt"),
+        "safe content",
+      );
+      try {
+        // Create a symlink inside nested/ that is safe at its current depth
+        // but would escape if moved to a shallower location
+        fs.symlinkSync(
+          outsideFile,
+          path.join(tempDir, "src-dir", "nested", "escape-link"),
+        );
+      } catch {
+        return; // Skip on systems that don't support symlinks
+      }
+
+      // Moving the directory should be blocked because it contains an escaping symlink
+      await expect(rwfs.mv("/src-dir", "/moved-dir")).rejects.toThrow("EACCES");
+
+      // Verify the original directory is still in place (move was undone)
+      expect(fs.existsSync(path.join(tempDir, "src-dir", "safe.txt"))).toBe(
+        true,
+      );
+    });
+
+    it("should allow mv of directory with only safe symlinks", async () => {
+      fs.mkdirSync(path.join(tempDir, "safe-dir"), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, "target-file.txt"), "target");
+      try {
+        // Symlink to a file within the sandbox
+        fs.symlinkSync(
+          path.join(tempDir, "target-file.txt"),
+          path.join(tempDir, "safe-dir", "internal-link"),
+        );
+      } catch {
+        return;
+      }
+
+      // This should succeed because all symlinks stay within sandbox
+      await rwfs.mv("/safe-dir", "/moved-safe-dir");
+      expect(
+        fs.existsSync(path.join(tempDir, "moved-safe-dir", "internal-link")),
+      ).toBe(true);
+    });
+  });
+
+  describe("full attack chain: symlink + mv + write (Fix 1+2)", () => {
+    it("should prevent arbitrary file write via symlink to non-existent outside path + mv", async () => {
+      // Attack chain:
+      // 1. Create a symlink to a non-existent path outside the sandbox
+      // 2. Put it in a directory and mv the directory
+      // 3. Try to write through the symlink
+      const attackTarget = path.join(outsideDir, "pwned.txt");
+
+      fs.mkdirSync(path.join(tempDir, "attack-dir"), { recursive: true });
+      try {
+        fs.symlinkSync(
+          attackTarget,
+          path.join(tempDir, "attack-dir", "evil-link"),
+        );
+      } catch {
+        return;
+      }
+
+      // Step 2: Try to mv the directory (should be blocked by Fix 2)
+      try {
+        await rwfs.mv("/attack-dir", "/moved-attack");
+      } catch {
+        // Expected: mv blocked
+      }
+
+      // Step 3: Even if mv somehow succeeded, writing through the symlink
+      // should be blocked by Fix 1 (canonical path validation)
+      try {
+        await rwfs.writeFile("/moved-attack/evil-link", "PWNED");
+      } catch {
+        // Expected: write blocked
+      }
+
+      // Verify the attack target was NOT created outside the sandbox
+      expect(fs.existsSync(attackTarget)).toBe(false);
+    });
+  });
+
+  describe("error message sanitization (Fix 4)", () => {
+    it("should not leak real paths in errors from rm on non-empty directory", async () => {
+      // Create a non-empty directory and try to rm without recursive
+      fs.mkdirSync(path.join(tempDir, "notempty-dir"));
+      fs.writeFileSync(
+        path.join(tempDir, "notempty-dir", "child.txt"),
+        "content",
+      );
+
+      try {
+        await rwfs.rm("/notempty-dir");
+      } catch (e) {
+        const msg = (e as Error).message;
+        expect(msg).not.toContain(tempDir);
+        expect(msg).toContain("/notempty-dir");
+      }
+    });
+
+    it("should not leak real paths in any error from readdir on a file", async () => {
+      try {
+        await rwfs.readdir("/allowed.txt");
+      } catch (e) {
+        const msg = (e as Error).message;
+        expect(msg).not.toContain(tempDir);
+        expect(msg).toContain("/allowed.txt");
+      }
+    });
+
+    it("should not leak real paths in readlink errors on non-symlink", async () => {
+      try {
+        await rwfs.readlink("/allowed.txt");
+      } catch (e) {
+        const msg = (e as Error).message;
+        expect(msg).not.toContain(tempDir);
+        expect(msg).toContain("/allowed.txt");
+      }
+    });
+
+    it("should not leak real paths in chmod errors", async () => {
+      try {
+        await rwfs.chmod("/nonexistent-chmod-target", 0o755);
+      } catch (e) {
+        const msg = (e as Error).message;
+        expect(msg).not.toContain(tempDir);
+      }
+    });
+
+    it("should not leak real paths in utimes errors", async () => {
+      const now = new Date();
+      try {
+        await rwfs.utimes("/nonexistent-utimes-target", now, now);
+      } catch (e) {
+        const msg = (e as Error).message;
+        expect(msg).not.toContain(tempDir);
+      }
+    });
+
+    it("should not leak real paths in link errors", async () => {
+      try {
+        await rwfs.link("/nonexistent-link-src", "/nonexistent-link-dest");
+      } catch (e) {
+        const msg = (e as Error).message;
+        expect(msg).not.toContain(tempDir);
+      }
+    });
+
+    it("should not leak real paths in mv ENOTEMPTY errors", async () => {
+      // Create two non-empty directories, try to mv one onto the other
+      fs.mkdirSync(path.join(tempDir, "mv-src-dir"));
+      fs.writeFileSync(path.join(tempDir, "mv-src-dir", "file.txt"), "content");
+      fs.mkdirSync(path.join(tempDir, "mv-dest-dir"));
+      fs.writeFileSync(path.join(tempDir, "mv-dest-dir", "other.txt"), "other");
+
+      try {
+        await rwfs.mv("/mv-src-dir", "/mv-dest-dir");
+      } catch (e) {
+        const msg = (e as Error).message;
+        expect(msg).not.toContain(tempDir);
+      }
+    });
+
+    it("should not leak real paths in cp errors", async () => {
+      try {
+        await rwfs.cp("/nonexistent-cp-src", "/cp-dest");
+      } catch (e) {
+        const msg = (e as Error).message;
+        expect(msg).not.toContain(tempDir);
+      }
+    });
+  });
 });
