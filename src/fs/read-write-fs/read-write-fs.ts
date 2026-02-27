@@ -197,6 +197,7 @@ export class ReadWriteFs implements IFileSystem {
   }
 
   async exists(path: string): Promise<boolean> {
+    if (path.includes("\0")) return false;
     const realPath = this.toRealPath(path);
     try {
       const canonical = this.resolveAndValidate(realPath, path);
@@ -374,6 +375,8 @@ export class ReadWriteFs implements IFileSystem {
   }
 
   async mv(src: string, dest: string): Promise<void> {
+    validatePath(src, "mv");
+    validatePath(dest, "mv");
     const srcReal = this.toRealPath(src);
     const destReal = this.toRealPath(dest);
     // Use validateParent (not resolveAndValidate) because rename() operates on
@@ -539,14 +542,24 @@ export class ReadWriteFs implements IFileSystem {
   private scanDir(virtualDir: string, paths: string[]): void {
     const realPath = this.toRealPath(virtualDir);
 
+    // Validate through the gate to ensure we don't follow symlinks or
+    // escape the sandbox root.  resolveAndValidate returns the canonical
+    // path, closing the TOCTOU gap between validation and readdirSync.
+    let canonical: string;
     try {
-      const entries = fs.readdirSync(realPath);
+      canonical = this.resolveAndValidate(realPath, virtualDir);
+    } catch {
+      return; // path escapes sandbox or doesn't exist
+    }
+
+    try {
+      const entries = fs.readdirSync(canonical);
       for (const entry of entries) {
         const virtualPath =
           virtualDir === "/" ? `/${entry}` : `${virtualDir}/${entry}`;
         paths.push(virtualPath);
 
-        const entryRealPath = nodePath.join(realPath, entry);
+        const entryRealPath = nodePath.join(canonical, entry);
         // Use lstatSync to avoid following OS symlinks that could point
         // outside the sandbox root. Symlinks are listed but not traversed.
         const stat = fs.lstatSync(entryRealPath);

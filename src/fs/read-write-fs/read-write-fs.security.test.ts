@@ -978,6 +978,56 @@ describe("ReadWriteFs Security - Path Traversal Prevention", () => {
     });
   });
 
+  describe("null byte validation in mv()", () => {
+    it("should reject null bytes in mv source path", async () => {
+      await expect(rwfs.mv("/file\x00.txt", "/dest.txt")).rejects.toThrow(
+        "null byte",
+      );
+    });
+
+    it("should reject null bytes in mv destination path", async () => {
+      fs.writeFileSync(path.join(tempDir, "source.txt"), "content");
+      await expect(rwfs.mv("/source.txt", "/dest\x00.txt")).rejects.toThrow(
+        "null byte",
+      );
+    });
+
+    it("should reject null bytes in both mv paths", async () => {
+      await expect(rwfs.mv("/src\x00", "/dst\x00")).rejects.toThrow(
+        "null byte",
+      );
+    });
+  });
+
+  describe("null byte handling in exists()", () => {
+    it("should return false for paths with null bytes", async () => {
+      expect(await rwfs.exists("/file\x00.txt")).toBe(false);
+    });
+
+    it("should return false for null byte in directory component", async () => {
+      expect(await rwfs.exists("/dir\x00name/file.txt")).toBe(false);
+    });
+  });
+
+  describe("getAllPaths uses validated canonical paths", () => {
+    it("should validate each directory through the gate in scanDir", () => {
+      // Create a symlink to outside directory on real FS
+      try {
+        fs.symlinkSync(outsideDir, path.join(tempDir, "escape-scan"));
+      } catch {
+        return;
+      }
+
+      const paths = rwfs.getAllPaths();
+      // The symlink entry should be listed (lstatSync finds it)
+      expect(paths).toContain("/escape-scan");
+      // But its children should NOT be listed (gate rejects the path)
+      for (const p of paths) {
+        expect(p).not.toMatch(/\/escape-scan\//);
+      }
+    });
+  });
+
   describe("base64 encoding with large files", () => {
     it("should handle base64 read of large file without crashing", async () => {
       const largeContent = "x".repeat(200_000);

@@ -1252,6 +1252,76 @@ describe("OverlayFs Security - Path Traversal Prevention", () => {
     });
   });
 
+  describe("canonical path usage for I/O (TOCTOU gap closure)", () => {
+    it("should use canonical path for readFile I/O", async () => {
+      // Verify readFile works correctly through the canonical path gate
+      const content = await overlay.readFile("/allowed.txt");
+      expect(content).toBe("This is allowed");
+    });
+
+    it("should use canonical path for stat I/O", async () => {
+      const stat = await overlay.stat("/allowed.txt");
+      expect(stat.isFile).toBe(true);
+    });
+
+    it("should use canonical path for lstat I/O", async () => {
+      const stat = await overlay.lstat("/allowed.txt");
+      expect(stat.isFile).toBe(true);
+    });
+
+    it("should use canonical path for readdir I/O", async () => {
+      const entries = await overlay.readdir("/");
+      expect(entries).toContain("allowed.txt");
+      expect(entries).toContain("subdir");
+    });
+
+    it("should use canonical path for exists I/O", async () => {
+      expect(await overlay.exists("/allowed.txt")).toBe(true);
+      expect(await overlay.exists("/nonexistent")).toBe(false);
+    });
+
+    it("should use canonical path for readlink I/O on real-fs symlink", async () => {
+      try {
+        fs.symlinkSync(
+          path.join(tempDir, "allowed.txt"),
+          path.join(tempDir, "canon-link"),
+        );
+      } catch {
+        return;
+      }
+
+      const target = await overlay.readlink("/canon-link");
+      // Should return virtual path, not real path
+      expect(target).not.toContain(tempDir);
+    });
+
+    it("should use canonical path for scanRealFs in getAllPaths", () => {
+      const paths = overlay.getAllPaths();
+      expect(paths).toContain("/allowed.txt");
+      expect(paths).toContain("/subdir");
+      // Should not contain real filesystem paths
+      for (const p of paths) {
+        expect(p).not.toContain(tempDir);
+      }
+    });
+
+    it("should block real-fs symlink traversal through canonical path validation", async () => {
+      // Create a directory symlink on disk pointing outside
+      try {
+        fs.symlinkSync(outsideDir, path.join(tempDir, "canon-escape"));
+      } catch {
+        return;
+      }
+
+      // All operations should fail via canonical path validation
+      await expect(
+        overlay.readFile("/canon-escape/secret.txt"),
+      ).rejects.toThrow();
+      await expect(overlay.stat("/canon-escape/secret.txt")).rejects.toThrow();
+      await expect(overlay.lstat("/canon-escape/secret.txt")).rejects.toThrow();
+    });
+  });
+
   describe("base64 encoding with large files", () => {
     it("should handle base64 read of large file without crashing", async () => {
       // Create a file larger than the spread operator limit (~100KB)

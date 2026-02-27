@@ -5,9 +5,10 @@
  * Changes don't persist to disk and can't escape the root directory.
  *
  * Security: Symlinks are blocked by default (allowSymlinks: false).
- * All real-FS access goes through validateRealPath_() / validateRealPathParent_()
- * gates which detect symlink traversal via path comparison. New methods must
- * use these gates — never access the real FS directly.
+ * All real-FS access goes through resolveRealPath_() / resolveRealPathParent_()
+ * gates which detect symlink traversal via path comparison and return the
+ * canonical path for I/O (closing the TOCTOU gap). New methods must use these
+ * gates — never access the real FS directly.
  */
 
 import * as fs from "node:fs";
@@ -31,10 +32,10 @@ import type {
 import {
   isPathWithinRoot,
   normalizePath,
+  resolveCanonicalPath,
   resolveCanonicalPathNoSymlinks,
   sanitizeSymlinkTarget,
   validatePath,
-  validateRealPath,
   validateRootDirectory,
 } from "../real-fs-utils.js";
 
@@ -279,39 +280,37 @@ export class OverlayFs implements IFileSystem {
   }
 
   /**
-   * Validate a real-FS path (follows symlinks).
-   * When !allowSymlinks, also rejects paths that traverse any symlink.
+   * Resolve a real-FS path to its canonical form and validate it stays
+   * within the sandbox.  Returns the canonical path for I/O, or null if
+   * the path escapes the root or traverses a symlink (when !allowSymlinks).
+   *
+   * Callers MUST use the returned canonical path for subsequent I/O to
+   * close the TOCTOU gap between validation and use.
    */
-  private validateRealPath_(realPath: string): boolean {
+  private resolveRealPath_(realPath: string | null): string | null {
+    if (!realPath) return null;
     if (!this.allowSymlinks) {
-      return (
-        resolveCanonicalPathNoSymlinks(
-          realPath,
-          this.root,
-          this.canonicalRoot,
-        ) !== null
+      return resolveCanonicalPathNoSymlinks(
+        realPath,
+        this.root,
+        this.canonicalRoot,
       );
     }
-    return validateRealPath(realPath, this.canonicalRoot);
+    return resolveCanonicalPath(realPath, this.canonicalRoot);
   }
 
   /**
-   * Validate only the parent directory of a real-FS path.
-   * Used by lstat/readlink/existsInOverlay where the final component
-   * may itself be a symlink we want to inspect (not follow).
+   * Resolve only the parent directory of a real-FS path, then join with
+   * the original basename.  Used by lstat/readlink/existsInOverlay where
+   * the final component may itself be a symlink we want to inspect (not
+   * follow).  Returns the canonical parent + basename for I/O, or null.
    */
-  private validateRealPathParent_(realPath: string): boolean {
+  private resolveRealPathParent_(realPath: string | null): string | null {
+    if (!realPath) return null;
     const parent = nodePath.dirname(realPath);
-    if (!this.allowSymlinks) {
-      return (
-        resolveCanonicalPathNoSymlinks(
-          parent,
-          this.root,
-          this.canonicalRoot,
-        ) !== null
-      );
-    }
-    return validateRealPath(parent, this.canonicalRoot);
+    const canonicalParent = this.resolveRealPath_(parent);
+    if (canonicalParent === null) return null;
+    return nodePath.join(canonicalParent, nodePath.basename(realPath));
   }
 
   private ensureParentDirs(path: string): void {
@@ -350,13 +349,14 @@ export class OverlayFs implements IFileSystem {
     // Using access() or stat() would follow symlinks and could leak existence
     // of files outside the sandbox.
     // Validate only the parent directory since lstat doesn't follow the final component.
-    const realPath = this.toRealPath(normalized);
-    if (!realPath || !this.validateRealPathParent_(realPath)) {
+    // Use the canonical path for I/O to close the TOCTOU gap.
+    const canonical = this.resolveRealPathParent_(this.toRealPath(normalized));
+    if (!canonical) {
       return false;
     }
 
     try {
-      await fs.promises.lstat(realPath);
+      await fs.promises.lstat(canonical);
       return true;
     } catch {
       return false;
@@ -407,19 +407,20 @@ export class OverlayFs implements IFileSystem {
       return memEntry.content;
     }
 
-    // Fall back to real filesystem
-    const realPath = this.toRealPath(normalized);
-    if (!realPath || !this.validateRealPath_(realPath)) {
+    // Fall back to real filesystem.  Use the canonical path for I/O to
+    // close the TOCTOU gap between validation and use.
+    const canonical = this.resolveRealPath_(this.toRealPath(normalized));
+    if (!canonical) {
       throw new Error(`ENOENT: no such file or directory, open '${path}'`);
     }
 
     try {
-      const stat = await fs.promises.lstat(realPath);
+      const stat = await fs.promises.lstat(canonical);
       if (stat.isSymbolicLink()) {
         if (!this.allowSymlinks) {
           throw new Error(`ENOENT: no such file or directory, open '${path}'`);
         }
-        const rawTarget = await fs.promises.readlink(realPath);
+        const rawTarget = await fs.promises.readlink(canonical);
         const virtualTarget = this.realTargetToVirtual(normalized, rawTarget);
         const resolvedTarget = this.resolveSymlink(normalized, virtualTarget);
         return this.readFileBuffer(resolvedTarget, seen);
@@ -434,7 +435,7 @@ export class OverlayFs implements IFileSystem {
           `EFBIG: file too large, read '${path}' (${stat.size} bytes, max ${this.maxFileReadSize})`,
         );
       }
-      const content = await fs.promises.readFile(realPath);
+      const content = await fs.promises.readFile(canonical);
       return new Uint8Array(content);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") {
@@ -546,9 +547,10 @@ export class OverlayFs implements IFileSystem {
       };
     }
 
-    // Fall back to real filesystem
-    const realPath = this.toRealPath(normalized);
-    if (!realPath || !this.validateRealPath_(realPath)) {
+    // Fall back to real filesystem.  Use the canonical path for I/O to
+    // close the TOCTOU gap between validation and use.
+    const canonical = this.resolveRealPath_(this.toRealPath(normalized));
+    if (!canonical) {
       throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
     }
 
@@ -556,12 +558,12 @@ export class OverlayFs implements IFileSystem {
       // Use lstat to avoid following OS-level symlinks directly.
       // If it's a symlink, resolve through the virtual layer to prevent
       // leaking metadata about files outside the sandbox.
-      const lstatResult = await fs.promises.lstat(realPath);
+      const lstatResult = await fs.promises.lstat(canonical);
       if (lstatResult.isSymbolicLink()) {
         if (!this.allowSymlinks) {
           throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
         }
-        const rawTarget = await fs.promises.readlink(realPath);
+        const rawTarget = await fs.promises.readlink(canonical);
         const virtualTarget = this.realTargetToVirtual(normalized, rawTarget);
         const resolvedTarget = this.resolveSymlink(normalized, virtualTarget);
         return this.stat(resolvedTarget, seen);
@@ -621,14 +623,15 @@ export class OverlayFs implements IFileSystem {
 
     // Fall back to real filesystem
     // For lstat, validate only the parent directory (lstat should not follow
-    // the final component, so we only need the parent to be within sandbox)
-    const realPath = this.toRealPath(normalized);
-    if (!realPath || !this.validateRealPathParent_(realPath)) {
+    // the final component, so we only need the parent to be within sandbox).
+    // Use the canonical path for I/O to close the TOCTOU gap.
+    const canonical = this.resolveRealPathParent_(this.toRealPath(normalized));
+    if (!canonical) {
       throw new Error(`ENOENT: no such file or directory, lstat '${path}'`);
     }
 
     try {
-      const stat = await fs.promises.lstat(realPath);
+      const stat = await fs.promises.lstat(canonical);
       return {
         isFile: stat.isFile(),
         isDirectory: stat.isDirectory(),
@@ -761,11 +764,12 @@ export class OverlayFs implements IFileSystem {
       }
     }
 
-    // Add entries from real filesystem with file types
-    const realPath = this.toRealPath(normalized);
-    if (realPath && this.validateRealPath_(realPath)) {
+    // Add entries from real filesystem with file types.
+    // Use the canonical path for I/O to close the TOCTOU gap.
+    const canonical = this.resolveRealPath_(this.toRealPath(normalized));
+    if (canonical) {
       try {
-        const realEntries = await fs.promises.readdir(realPath, {
+        const realEntries = await fs.promises.readdir(canonical, {
           withFileTypes: true,
         });
         for (const dirent of realEntries) {
@@ -837,20 +841,21 @@ export class OverlayFs implements IFileSystem {
       return { normalized, outsideOverlay: true };
     }
 
-    // Check real filesystem
-    const realPath = this.toRealPath(normalized);
-    if (!realPath || !this.validateRealPath_(realPath)) {
+    // Check real filesystem.  Use the canonical path for I/O to close the
+    // TOCTOU gap between validation and use.
+    const canonical = this.resolveRealPath_(this.toRealPath(normalized));
+    if (!canonical) {
       // Path doesn't map to real filesystem (security check failed)
       return { normalized, outsideOverlay: true };
     }
 
     try {
-      const stat = await fs.promises.lstat(realPath);
+      const stat = await fs.promises.lstat(canonical);
       if (stat.isSymbolicLink()) {
         if (!this.allowSymlinks) {
           return { normalized, outsideOverlay: true };
         }
-        const rawTarget = await fs.promises.readlink(realPath);
+        const rawTarget = await fs.promises.readlink(canonical);
         const virtualTarget = this.realTargetToVirtual(normalized, rawTarget);
         const resolvedTarget = this.resolveSymlink(normalized, virtualTarget);
         return this.resolveForReaddir(resolvedTarget, true);
@@ -1005,21 +1010,22 @@ export class OverlayFs implements IFileSystem {
   private scanRealFs(virtualDir: string, paths: Set<string>): void {
     if (this.deleted.has(virtualDir)) return;
 
-    const realPath = this.toRealPath(virtualDir);
-    if (!realPath || !this.validateRealPath_(realPath)) return;
+    // Use the canonical path for I/O to close the TOCTOU gap.
+    const canonical = this.resolveRealPath_(this.toRealPath(virtualDir));
+    if (!canonical) return;
 
     try {
-      const entries = fs.readdirSync(realPath);
+      const entries = fs.readdirSync(canonical);
       for (const entry of entries) {
         const virtualPath =
           virtualDir === "/" ? `/${entry}` : `${virtualDir}/${entry}`;
         if (this.deleted.has(virtualPath)) continue;
         paths.add(virtualPath);
 
-        const entryRealPath = nodePath.join(realPath, entry);
+        const entryPath = nodePath.join(canonical, entry);
         // Use lstatSync to avoid following OS symlinks that could point
         // outside the sandbox root. Symlinks are listed but not traversed.
-        const stat = fs.lstatSync(entryRealPath);
+        const stat = fs.lstatSync(entryPath);
         if (stat.isDirectory()) {
           this.scanRealFs(virtualPath, paths);
         }
@@ -1143,14 +1149,15 @@ export class OverlayFs implements IFileSystem {
 
     // Fall back to real filesystem
     // For readlink, validate only the parent directory (readlink reads the
-    // symlink itself, it doesn't follow it - same pattern as lstat)
-    const realPath = this.toRealPath(normalized);
-    if (!realPath || !this.validateRealPathParent_(realPath)) {
+    // symlink itself, it doesn't follow it - same pattern as lstat).
+    // Use the canonical path for I/O to close the TOCTOU gap.
+    const canonical = this.resolveRealPathParent_(this.toRealPath(normalized));
+    if (!canonical) {
       throw new Error(`ENOENT: no such file or directory, readlink '${path}'`);
     }
 
     try {
-      const rawTarget = await fs.promises.readlink(realPath);
+      const rawTarget = await fs.promises.readlink(canonical);
       return this.realTargetToVirtual(normalized, rawTarget);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") {
@@ -1227,19 +1234,21 @@ export class OverlayFs implements IFileSystem {
           );
         }
 
-        // If not in memory, check real filesystem
+        // If not in memory, check real filesystem.
+        // Use canonical paths for I/O to close the TOCTOU gap.
         if (!entry) {
           const realPath = this.toRealPath(resolved);
-          if (realPath && this.validateRealPath_(realPath)) {
+          const canonical = this.resolveRealPath_(realPath);
+          if (canonical) {
             try {
-              const stat = await fs.promises.lstat(realPath);
+              const stat = await fs.promises.lstat(canonical);
               if (stat.isSymbolicLink()) {
                 if (!this.allowSymlinks) {
                   throw new Error(
                     `ENOENT: no such file or directory, realpath '${path}'`,
                   );
                 }
-                const rawTarget = await fs.promises.readlink(realPath);
+                const rawTarget = await fs.promises.readlink(canonical);
                 const virtualTarget = this.realTargetToVirtual(
                   resolved,
                   rawTarget,
@@ -1259,31 +1268,30 @@ export class OverlayFs implements IFileSystem {
               }
               throw e;
             }
-          } else if (
-            realPath &&
-            !this.allowSymlinks &&
-            this.validateRealPathParent_(realPath)
-          ) {
-            // validateRealPath_ rejected this path (symlink traversal
+          } else if (!this.allowSymlinks) {
+            // resolveRealPath_ rejected this path (symlink traversal
             // detected). Use parent validation + lstat to check whether
             // this specific component is a symlink and throw ENOENT.
-            try {
-              const stat = await fs.promises.lstat(realPath);
-              if (stat.isSymbolicLink()) {
-                throw new Error(
-                  `ENOENT: no such file or directory, realpath '${path}'`,
-                );
+            const canonicalWithBase = this.resolveRealPathParent_(realPath);
+            if (canonicalWithBase) {
+              try {
+                const stat = await fs.promises.lstat(canonicalWithBase);
+                if (stat.isSymbolicLink()) {
+                  throw new Error(
+                    `ENOENT: no such file or directory, realpath '${path}'`,
+                  );
+                }
+              } catch (e) {
+                if (
+                  (e as Error).message?.includes("ENOENT") ||
+                  (e as Error).message?.includes("ELOOP")
+                ) {
+                  throw new Error(
+                    `ENOENT: no such file or directory, realpath '${path}'`,
+                  );
+                }
+                throw e;
               }
-            } catch (e) {
-              if (
-                (e as Error).message?.includes("ENOENT") ||
-                (e as Error).message?.includes("ELOOP")
-              ) {
-                throw new Error(
-                  `ENOENT: no such file or directory, realpath '${path}'`,
-                );
-              }
-              throw e;
             }
           }
         }
