@@ -63,9 +63,20 @@ function initDevFiles(fs: SyncInitFs): void {
 }
 
 /**
- * Initialize /proc with simulated process information
+ * Virtual process info for /proc filesystem initialization.
  */
-function initProcFiles(fs: SyncInitFs): void {
+interface VirtualProcessInfo {
+  pid: number;
+  ppid: number;
+  uid: number;
+  gid: number;
+}
+
+/**
+ * Initialize /proc with virtual process information.
+ * Never exposes real host process info.
+ */
+function initProcFiles(fs: SyncInitFs, processInfo: VirtualProcessInfo): void {
   fs.mkdirSync("/proc/self/fd", { recursive: true });
 
   // Kernel version (from shared metadata)
@@ -76,9 +87,9 @@ function initProcFiles(fs: SyncInitFs): void {
   fs.writeFileSync("/proc/self/cmdline", "bash\0");
   fs.writeFileSync("/proc/self/comm", "bash\n");
   if (fs.writeFileLazy) {
-    fs.writeFileLazy("/proc/self/status", formatProcStatus);
+    fs.writeFileLazy("/proc/self/status", () => formatProcStatus(processInfo));
   } else {
-    fs.writeFileSync("/proc/self/status", formatProcStatus());
+    fs.writeFileSync("/proc/self/status", formatProcStatus(processInfo));
   }
 
   // File descriptors
@@ -94,11 +105,12 @@ function initProcFiles(fs: SyncInitFs): void {
 export function initFilesystem(
   fs: IFileSystem,
   useDefaultLayout: boolean,
+  processInfo: VirtualProcessInfo = { pid: 1, ppid: 0, uid: 1000, gid: 1000 },
 ): void {
   // Initialize for filesystems that support sync methods (InMemoryFs and OverlayFs)
   if (isSyncInitFs(fs)) {
     initCommonDirectories(fs, useDefaultLayout);
     initDevFiles(fs);
-    initProcFiles(fs);
+    initProcFiles(fs, processInfo);
   }
 }

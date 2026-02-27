@@ -185,6 +185,17 @@ export interface BashOptions {
    * When provided, interpreter emits coverage hits for analysis.
    */
   coverage?: FeatureCoverageWriter;
+  /**
+   * Virtual process info for sandboxed environment.
+   * Overrides the default virtual PID/UID values exposed via $$, $PPID, $UID, $EUID, $BASHPID,
+   * and /proc/self/status. Real host process info is never exposed.
+   */
+  processInfo?: {
+    pid?: number;
+    ppid?: number;
+    uid?: number;
+    gid?: number;
+  };
 }
 
 export interface ExecOptions {
@@ -299,8 +310,12 @@ export class Bash {
       lastArg: "", // $_ is initially empty (or could be shell name)
       startTime: Date.now(),
       lastBackgroundPid: 0,
-      bashPid: process.pid, // BASHPID starts as the main process PID
-      nextVirtualPid: process.pid + 1, // Counter for unique subshell PIDs
+      virtualPid: options.processInfo?.pid ?? 1,
+      virtualPpid: options.processInfo?.ppid ?? 0,
+      virtualUid: options.processInfo?.uid ?? 1000,
+      virtualGid: options.processInfo?.gid ?? 1000,
+      bashPid: options.processInfo?.pid ?? 1, // BASHPID starts as virtual PID
+      nextVirtualPid: (options.processInfo?.pid ?? 1) + 1, // Counter for unique subshell PIDs
       currentLine: 1, // $LINENO starts at 1
       options: {
         errexit: false,
@@ -354,7 +369,12 @@ export class Bash {
 
     // Initialize filesystem with standard directories and device files
     // Only applies to InMemoryFs - other filesystems use real directories
-    initFilesystem(fs, this.useDefaultLayout);
+    initFilesystem(fs, this.useDefaultLayout, {
+      pid: this.state.virtualPid,
+      ppid: this.state.virtualPpid,
+      uid: this.state.virtualUid,
+      gid: this.state.virtualGid,
+    });
 
     if (cwd !== "/" && fs instanceof InMemoryFs) {
       try {

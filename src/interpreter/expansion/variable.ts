@@ -11,7 +11,7 @@
 
 import { parseArithmeticExpression } from "../../parser/arithmetic-parser.js";
 import { Parser } from "../../parser/parser.js";
-import { BASH_VERSION, getProcessInfo } from "../../shell-metadata.js";
+import { BASH_VERSION } from "../../shell-metadata.js";
 import { evaluateArithmetic } from "../arithmetic.js";
 import { BadSubstitutionError, NounsetError } from "../errors.js";
 import {
@@ -127,7 +127,7 @@ export async function getVariable(
     case "?":
       return String(ctx.state.lastExitCode);
     case "$":
-      return String(process.pid);
+      return String(ctx.state.virtualPid);
     case "#":
       return ctx.state.env.get("#") || "0";
     case "@":
@@ -175,19 +175,15 @@ export async function getVariable(
     case "OLDPWD":
       // Check if OLDPWD is in env (might have been unset)
       return ctx.state.env.get("OLDPWD") ?? "";
-    case "PPID": {
-      // Parent process ID (from shared metadata)
-      const { ppid } = getProcessInfo();
-      return String(ppid);
-    }
-    case "UID": {
-      // Real user ID (from shared metadata)
-      const { uid } = getProcessInfo();
-      return String(uid);
-    }
+    case "PPID":
+      // Virtual parent process ID (never exposes real host PPID)
+      return String(ctx.state.virtualPpid);
+    case "UID":
+      // Virtual user ID (never exposes real host UID)
+      return String(ctx.state.virtualUid);
     case "EUID":
-      // Effective user ID (same as UID in our simulated environment)
-      return String(process.geteuid?.() ?? getProcessInfo().uid);
+      // Virtual effective user ID (never exposes real host EUID)
+      return String(ctx.state.virtualUid);
     case "RANDOM":
       // Random number between 0 and 32767
       return String(Math.floor(Math.random() * 32768));

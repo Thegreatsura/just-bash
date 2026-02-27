@@ -34,6 +34,23 @@ describe("Filename Attack Prevention", () => {
     });
   });
 
+  describe("Null Byte in Redirections", () => {
+    it("should fail when redirecting output to filename with null byte", async () => {
+      const result = await bash.exec("echo test > $'/tmp/file\\x00.txt'");
+      expect(result.exitCode).not.toBe(0);
+    });
+
+    it("should fail when appending to filename with null byte", async () => {
+      const result = await bash.exec("echo test >> $'/tmp/file\\x00.txt'");
+      expect(result.exitCode).not.toBe(0);
+    });
+
+    it("should fail when clobbering to filename with null byte", async () => {
+      const result = await bash.exec("echo test >| $'/tmp/file\\x00.txt'");
+      expect(result.exitCode).not.toBe(0);
+    });
+  });
+
   describe("Special Character Filenames", () => {
     it("should handle filenames starting with -", async () => {
       const result = await bash.exec(`

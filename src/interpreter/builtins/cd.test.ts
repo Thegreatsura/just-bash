@@ -78,6 +78,15 @@ describe("cd builtin", () => {
     });
   });
 
+  describe("virtual isolation", () => {
+    it("should not change real process.cwd() when cd is executed", async () => {
+      const realCwd = process.cwd();
+      const env = new Bash();
+      await env.exec("cd /tmp");
+      expect(process.cwd()).toBe(realCwd);
+    });
+  });
+
   describe("error cases", () => {
     it("should error on non-existent directory", async () => {
       const env = new Bash();

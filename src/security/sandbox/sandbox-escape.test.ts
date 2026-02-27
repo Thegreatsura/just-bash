@@ -293,6 +293,69 @@ describe("Sandbox Escape Prevention", () => {
     });
   });
 
+  describe("Process Info Virtualization", () => {
+    it("should return virtual PID for $$, not real process.pid", async () => {
+      const result = await bash.exec("echo $$");
+      expect(result.stdout.trim()).toBe("1");
+      expect(result.stdout.trim()).not.toBe(String(process.pid));
+    });
+
+    it("should return virtual PPID for $PPID, not real process.ppid", async () => {
+      const result = await bash.exec("echo $PPID");
+      expect(result.stdout.trim()).toBe("0");
+      expect(result.stdout.trim()).not.toBe(String(process.ppid));
+    });
+
+    it("should return virtual UID for $UID, not real UID", async () => {
+      const result = await bash.exec("echo $UID");
+      expect(result.stdout.trim()).toBe("1000");
+      const realUid = process.getuid?.();
+      if (realUid !== undefined && realUid !== 1000) {
+        expect(result.stdout.trim()).not.toBe(String(realUid));
+      }
+    });
+
+    it("should return virtual EUID for $EUID, not real EUID", async () => {
+      const result = await bash.exec("echo $EUID");
+      expect(result.stdout.trim()).toBe("1000");
+    });
+
+    it("should return virtual PID for $BASHPID", async () => {
+      const result = await bash.exec("echo $BASHPID");
+      expect(result.stdout.trim()).toBe("1");
+      expect(result.stdout.trim()).not.toBe(String(process.pid));
+    });
+
+    it("should use virtual values in /proc/self/status", async () => {
+      const result = await bash.exec("cat /proc/self/status");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Pid:\t1");
+      expect(result.stdout).toContain("PPid:\t0");
+      expect(result.stdout).toContain("Uid:\t1000");
+      expect(result.stdout).toContain("Gid:\t1000");
+      expect(result.stdout).not.toContain(`Pid:\t${process.pid}`);
+    });
+
+    it("should allow custom processInfo override", async () => {
+      const customBash = new Bash({
+        processInfo: { pid: 42, ppid: 10, uid: 500, gid: 500 },
+      });
+      const result = await customBash.exec("echo $$ $PPID $UID $EUID $BASHPID");
+      expect(result.stdout.trim()).toBe("42 10 500 500 42");
+    });
+
+    it("should use custom processInfo in /proc/self/status", async () => {
+      const customBash = new Bash({
+        processInfo: { pid: 42, ppid: 10, uid: 500, gid: 500 },
+      });
+      const result = await customBash.exec("cat /proc/self/status");
+      expect(result.stdout).toContain("Pid:\t42");
+      expect(result.stdout).toContain("PPid:\t10");
+      expect(result.stdout).toContain("Uid:\t500");
+      expect(result.stdout).toContain("Gid:\t500");
+    });
+  });
+
   describe("Special File Handling", () => {
     it("should handle /dev/null safely", async () => {
       const result = await bash.exec("echo test > /dev/null; echo $?");

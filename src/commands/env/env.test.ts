@@ -68,3 +68,23 @@ describe("printenv command", () => {
     expect(result.exitCode).toBe(0);
   });
 });
+
+describe("env/printenv host isolation", () => {
+  it("should not leak real host env vars via env", async () => {
+    const bash = new Bash();
+    const result = await bash.exec("env");
+    // Should not contain common host env vars
+    expect(result.stdout).not.toContain("NODE_ENV=");
+    expect(result.stdout).not.toContain("SHELL=");
+    expect(result.stdout).not.toContain("TERM=");
+    expect(result.stdout).not.toContain("LANG=");
+    expect(result.stdout).not.toContain("USER=");
+  });
+
+  it("should return virtual PATH, not host PATH", async () => {
+    const bash = new Bash();
+    const result = await bash.exec("printenv PATH");
+    expect(result.stdout.trim()).toBe("/usr/bin:/bin");
+    expect(result.stdout).not.toContain("/usr/local/bin");
+  });
+});

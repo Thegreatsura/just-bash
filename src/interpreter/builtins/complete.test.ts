@@ -19,6 +19,10 @@ function createMockCtx(): InterpreterContext {
     lastBackgroundPid: 0,
     bashPid: 1,
     nextVirtualPid: 2,
+    virtualPid: 1,
+    virtualPpid: 0,
+    virtualUid: 1000,
+    virtualGid: 1000,
     currentLine: 0,
     options: {
       errexit: false,

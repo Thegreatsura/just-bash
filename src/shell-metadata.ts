@@ -18,27 +18,16 @@ export const KERNEL_VERSION =
   "Linux version 5.15.0-generic (just-bash) #1 SMP PREEMPT";
 
 /**
- * Get process metadata (values that come from the running Node process)
+ * Format /proc/self/status content using virtual process info.
+ * Never exposes real host process information.
  */
-export function getProcessInfo(): {
+export function formatProcStatus(info: {
   pid: number;
   ppid: number;
   uid: number;
   gid: number;
-} {
-  return {
-    pid: process.pid,
-    ppid: process.ppid,
-    uid: process.getuid?.() ?? 1000,
-    gid: process.getgid?.() ?? 1000,
-  };
-}
-
-/**
- * Format /proc/self/status content
- */
-export function formatProcStatus(): string {
-  const { pid, ppid, uid, gid } = getProcessInfo();
+}): string {
+  const { pid, ppid, uid, gid } = info;
   return `Name:\tbash
 State:\tR (running)
 Pid:\t${pid}

@@ -282,6 +282,14 @@ export interface ProcessState {
   bashPid: number;
   /** Counter for generating unique virtual PIDs for subshells */
   nextVirtualPid: number;
+  /** Virtual main shell PID for $$ (default 1, never exposes real process.pid) */
+  virtualPid: number;
+  /** Virtual parent PID for $PPID (default 0, never exposes real process.ppid) */
+  virtualPpid: number;
+  /** Virtual user ID for $UID/$EUID (default 1000, never exposes real UID) */
+  virtualUid: number;
+  /** Virtual group ID (default 1000, never exposes real GID) */
+  virtualGid: number;
 }
 
 // ============================================================================

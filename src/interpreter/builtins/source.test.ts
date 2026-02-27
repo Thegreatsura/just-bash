@@ -125,6 +125,22 @@ EOF
     });
   });
 
+  describe("sandbox isolation", () => {
+    it("should not access real /etc/passwd via source", async () => {
+      const env = new Bash();
+      const result = await env.exec("source /etc/passwd");
+      expect(result.stderr).toContain("No such file or directory");
+      expect(result.exitCode).toBe(1);
+    });
+
+    it("should not access real files outside VFS via source", async () => {
+      const env = new Bash();
+      const result = await env.exec("source /etc/hosts");
+      expect(result.stderr).toContain("No such file or directory");
+      expect(result.exitCode).toBe(1);
+    });
+  });
+
   describe("return in sourced script", () => {
     it("should support return in sourced script", async () => {
       const env = new Bash();
