@@ -1,5 +1,38 @@
 # just-bash
 
+## 3.6.1
+
+### Patch Changes
+
+- [#562](https://github.com/vercel-labs/just-bash/pull/562) [`3ebd1c2`](https://github.com/vercel-labs/just-bash/commit/3ebd1c291462bc6bad3c6df7ebfe563d8799bfd9) Thanks [@Hazzng](https://github.com/Hazzng)! - Treat `/dev/null` redirects as a discard/EOF device without requiring filesystem device nodes. Output redirects discard data, input redirects return EOF, and read-write redirects support both behaviors. This works on filesystems that cannot initialize `/dev`, preserves command exit statuses, and prevents append redirects from growing a backing file.
+
+  This change covers redirect operators only. Commands that access `/dev/null` by path, such as `cat`, `cp`, and `test -e`, still depend on filesystem entries. `/dev/stdout` and `/dev/stderr` retain their existing behavior; stream-device identity and offset handling are separate work.
+
+- [#552](https://github.com/vercel-labs/just-bash/pull/552) [`7c39159`](https://github.com/vercel-labs/just-bash/commit/7c391598ec1efc4ffcc12388546fbef8f76a7b4e) Thanks [@FredAmartey](https://github.com/FredAmartey)! - Evaluate the index of `X[expr]` in `jq` against the input, as jq does, so `.foo[.bar]` and `$m[.]` look up the right key. The index is read before the base and several keys come out in jq's order. `path()` and `del` follow the same rule, and `xan` can index with a column, as in `split(names, '|')[idx]`. Filters that leaned on the old reading change too: `.items[length-1]` now reads `length` from the input, so use `.items[-1]` for the last item.
+
+- [#439](https://github.com/vercel-labs/just-bash/pull/439) [`58d1ecf`](https://github.com/vercel-labs/just-bash/commit/58d1ecf31b768ea9834e151b166cf4cea32046ba) Thanks [@trieloff](https://github.com/trieloff)! - bash/sh: start nested shells from the exported environment only
+
+  `Bash.exec(…, { env, replaceEnv: true })` set its variables for commands run directly, but a nested `sh -c` or `bash -c` never saw them, and still saw the constructor's env instead:
+
+  ```js
+  const bash = new Bash({ env: { SECRET: "leak" } });
+  await bash.exec("sh", {
+    args: ["-c", "echo [$MARKER]; printenv SECRET"],
+    env: { MARKER: "YES" },
+    replaceEnv: true,
+  }); // was "[]\nleak\n", now "[YES]\n"
+  ```
+
+  Nested `sh` and `bash` now inherit only exported variables. Per-exec environment values reach them, `export -n` takes effect, and exports made in one `exec()` no longer affect later calls. Wrappers such as `env`, `time`, and `timeout` use the active caller's variables and exports, preserving script exports without restoring constructor variables during replacement execution.
+
+  Startup resets `IFS` and `OPTIND` while retaining inherited export attributes. `cd -` uses the current `OLDPWD`: an unset value reports an error, and an empty value succeeds without changing directory.
+
+- [#521](https://github.com/vercel-labs/just-bash/pull/521) [`864dfe5`](https://github.com/vercel-labs/just-bash/commit/864dfe5d4b9cf0447c4eb2002193f2ab2008bd0e) Thanks [@Hazzng](https://github.com/Hazzng)! - Fix `js-exec` Buffer encoding defaults, UTF-8 reads, typed-array inputs, character-boundary writes, and range validation. Reduce temporary allocations in byte conversion, `tr`, and `sed` while preserving execution limits.
+
+- [#561](https://github.com/vercel-labs/just-bash/pull/561) [`6df20ce`](https://github.com/vercel-labs/just-bash/commit/6df20cebf56bf9bcc2d63b425f26a7446b13a67d) Thanks [@Hazzng](https://github.com/Hazzng)! - Report a missing or non-directory parent of an output redirect target the way bash does
+
+  On a filesystem whose `writeFile` throws `ENOENT` for a missing parent directory, `echo x > /missing/f` rejected the whole `bash.exec()` call. Inside a loop, the loop stopped after its first iteration and the script still exited 0. The command now fails alone with `bash: /missing/f: No such file or directory` (or `Not a directory`), `$?` is 1, and the script continues. Numeric-fd redirects such as `exec 3> /missing/f` print the same message in place of `cannot open redirect target`. Other filesystem errors, such as `EROFS`, behave as before.
+
 ## 3.6.0
 
 ### Minor Changes
